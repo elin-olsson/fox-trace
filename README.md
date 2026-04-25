@@ -1,8 +1,11 @@
 ![Fox-trace banner](banner.png)
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE) [![CI](https://github.com/elin-olsson/fox-trace/actions/workflows/ci.yml/badge.svg)](https://github.com/elin-olsson/fox-trace/actions/workflows/ci.yml)
+<p align="center">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-blue.svg" alt="License: MIT"></a>
+  <a href="https://github.com/elin-olsson/fox-trace/actions/workflows/ci.yml"><img src="https://github.com/elin-olsson/fox-trace/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+</p>
 
-A lightweight security tool designed to map and visualize SSH trust relationships on Linux systems. 
+Fox-trace is a lightweight security tool designed to map and visualize SSH trust relationships on Linux systems. 
 
 Fox-trace identifies "Shadow Paths" — the potential routes an attacker could take to move laterally through a network by exploiting local SSH artifacts like keys, config files, and connection history.
 
