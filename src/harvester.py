@@ -3,6 +3,7 @@ import hashlib
 import base64
 import urllib.request
 import json
+import time
 from pathlib import Path
 
 class IdentityMatcher:
@@ -20,7 +21,6 @@ class IdentityMatcher:
                 keys_data = json.loads(response.read().decode())
                 fingerprints = []
                 for k in keys_data:
-                    # GitHub API provides 'key' which is the full public key string
                     fp = self._generate_fingerprint_from_raw(k['key'])
                     if fp:
                         fingerprints.append(fp)
@@ -49,7 +49,9 @@ class SSHHarvester:
             "public_keys": [],
             "authorized_keys": [],
             "known_hosts": [],
-            "config_files": []
+            "config_files": [],
+            "active_agents": [],
+            "risk_alerts": []
         }
 
     def _get_fingerprint(self, key_content):
@@ -64,20 +66,65 @@ class SSHHarvester:
         except Exception:
             return None
 
+    def _get_file_age_days(self, file_path):
+        """Returns the age of a file in days."""
+        try:
+            mtime = os.path.getmtime(file_path)
+            return int((time.time() - mtime) / (24 * 3600))
+        except Exception:
+            return 0
+
+    def _detect_agents(self):
+        """Searches for active SSH agent sockets in /tmp."""
+        agents = []
+        tmp_dir = Path("/tmp")
+        try:
+            # Look for ssh-XXXXXX/agent.XXXX patterns
+            for agent_sock in tmp_dir.glob("ssh-*/agent.*"):
+                try:
+                    stat_info = agent_sock.stat()
+                    agents.append({
+                        "path": str(agent_sock),
+                        "owner_uid": stat_info.st_uid,
+                        "permissions": oct(stat_info.st_mode)[-3:]
+                    })
+                except Exception:
+                    continue
+        except Exception:
+            pass
+        return agents
+
     def harvest(self):
         """Main method to collect all SSH traces."""
         p = Path(self.ssh_dir)
+        
+        # Phase 2: Detect Active Agents
+        self.results["active_agents"] = self._detect_agents()
+        if self.results["active_agents"]:
+            self.results["risk_alerts"].append({
+                "level": "MEDIUM",
+                "message": f"Found {len(self.results['active_agents'])} active SSH agent sockets in /tmp. These could potentially be hijacked."
+            })
+
         if not p.exists():
             return self.results
 
         for item in p.iterdir():
             if item.is_file():
+                age = self._get_file_age_days(item)
+                
                 # Detect private keys
                 if "PRIVATE KEY" in item.read_text(errors='ignore')[:100]:
                     self.results["private_keys"].append({
                         "path": str(item),
-                        "name": item.name
+                        "name": item.name,
+                        "age_days": age
                     })
+                    if age > 180:
+                        self.results["risk_alerts"].append({
+                            "level": "LOW",
+                            "message": f"Private key '{item.name}' is stale ({age} days old)."
+                        })
                 
                 # Detect public keys
                 elif item.suffix == ".pub":
@@ -86,7 +133,8 @@ class SSHHarvester:
                         "path": str(item),
                         "name": item.name,
                         "fingerprint": self._get_fingerprint(content),
-                        "comment": content.split()[-1] if len(content.split()) > 2 else "None"
+                        "comment": content.split()[-1] if len(content.split()) > 2 else "None",
+                        "age_days": age
                     })
 
                 # Specific files
@@ -109,7 +157,6 @@ class SSHHarvester:
                         parts = line.split()
                         if not parts: continue
                         host_part = parts[0]
-                        
                         is_hashed = host_part.startswith("|1|")
                         hosts.append({
                             "host": host_part if not is_hashed else "HASHED_ADDR",
@@ -152,8 +199,6 @@ if __name__ == "__main__":
     matcher = IdentityMatcher()
     
     findings = harvester.harvest()
-    
-    # Check against your GitHub identity
     github_user = "elin-olsson"
     my_github_fingerprints = matcher.fetch_github_keys(github_user)
     
@@ -162,14 +207,12 @@ if __name__ == "__main__":
     print(f"Found {len(findings['public_keys'])} public keys.")
     print(f"Found {len(findings['authorized_keys'])} entries in authorized_keys.")
     print(f"Found {len(findings['known_hosts'])} known hosts (connections).")
+    print(f"Found {len(findings['active_agents'])} active SSH agents.")
     
-    if findings['known_hosts']:
-        plain = [h for h in findings['known_hosts'] if not h['is_hashed']]
-        hashed = [h for h in findings['known_hosts'] if h['is_hashed']]
-        print(f"  -> Plain-text hosts: {len(plain)}")
-        print(f"  -> Hashed hosts: {len(hashed)}")
-        for h in plain[:5]: # Show first 5 plain hosts
-            print(f"     - {h['host']} ({h['key_type']})")
+    if findings['risk_alerts']:
+        print(f"\n--- Risk Alerts ---")
+        for alert in findings['risk_alerts']:
+            print(f"[{alert['level']}] {alert['message']}")
     
     if my_github_fingerprints:
         print(f"\n--- Identity Matching (GitHub: {github_user}) ---")
