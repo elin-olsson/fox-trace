@@ -34,6 +34,12 @@ python3 src/harvester.py
 
 ## Usage
 
+All commands below are run from inside the `fox-trace` directory:
+
+```bash
+cd fox-trace
+```
+
 ```bash
 python3 src/harvester.py [options]
 ```

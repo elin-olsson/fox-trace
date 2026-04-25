@@ -8,6 +8,10 @@ import time
 import argparse
 from pathlib import Path
 
+_REPO_ROOT = Path(__file__).parent.parent
+_DEFAULT_JSON = str(_REPO_ROOT / "data" / "findings.json")
+_DEFAULT_HTML = str(_REPO_ROOT / "data" / "shadow_map.html")
+
 
 def _compute_fingerprint(key_string):
     """Compute SHA256 fingerprint matching ssh-keygen -lf output."""
@@ -510,9 +514,9 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description="Fox-trace — SSH Trust & Lateral Movement Mapper"
     )
-    parser.add_argument("--json", metavar="FILE", default="data/findings.json",
-                        help="Write findings to JSON (default: data/findings.json)")
-    parser.add_argument("--html", metavar="FILE", nargs="?", const="data/shadow_map.html",
+    parser.add_argument("--json", metavar="FILE", default=_DEFAULT_JSON,
+                        help=f"Write findings to JSON (default: {_DEFAULT_JSON})")
+    parser.add_argument("--html", metavar="FILE", nargs="?", const=_DEFAULT_HTML,
                         help="Generate interactive Shadow Map HTML")
     parser.add_argument("--github", metavar="USER",
                         help="Match local keys against a GitHub user's public keys")
