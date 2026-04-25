@@ -2,7 +2,6 @@
   <img src="banner.png" alt="Fox-trace Banner">
 </p>
 
-# Fox-trace 🦊🕸️
 **The SSH Trust & Lateral Movement Mapper**
 
 Fox-trace is a lightweight security tool designed to map and visualize SSH trust relationships on Linux systems. By analyzing local SSH artifacts, it identifies "Shadow Paths" — the potential routes an attacker could take to move laterally through a network using existing keys and trust configurations.
