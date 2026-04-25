@@ -57,7 +57,7 @@ class FoxVisualizer:
 
             nodes.append({
                 "id": key_id,
-                "label": f"Key: {key['name']}",
+                "label": f"Key: {key['name'].replace('.pub', '')}",
                 "type": "key",
                 "key_type": key.get("key_type", "Unknown"),
                 "comment": key.get("comment", ""),
