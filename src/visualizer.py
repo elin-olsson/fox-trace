@@ -1,5 +1,7 @@
+import ipaddress
 import json
 import os
+import re
 import webbrowser
 from datetime import datetime
 
@@ -8,6 +10,18 @@ class FoxVisualizer:
     def __init__(self, data_path="data/findings.json", output_path="data/shadow_map.html"):
         self.data_path = data_path
         self.output_path = output_path
+
+    @staticmethod
+    def _host_category(host):
+        h = re.sub(r'^\[(.+)\]:\d+$', r'\1', host)
+        if h in ('localhost', '127.0.0.1', '::1'):
+            return 'loopback'
+        if h in ('github.com', 'gitlab.com', 'bitbucket.org'):
+            return 'service'
+        try:
+            return 'private' if ipaddress.ip_address(h).is_private else 'external'
+        except ValueError:
+            return 'external'
 
     def _prepare_graph_data(self, data):
         blast_data = data.get("blast_radius", {})
@@ -34,9 +48,8 @@ class FoxVisualizer:
             key_name = key["name"].replace(".pub", "")
             key_id = f"key_{key.get('fingerprint') or key['name']}"
             r = blast_data.get(key_name, {"percentage": 0, "count": 0, "confidence": "potential"})
-            encrypted = True  # public key — no passphrase concept, assume safe
+            encrypted = True
 
-            # Find matching private key for passphrase info
             for priv in data.get("private_keys", []):
                 if priv["name"].replace(".pub", "") == key_name or priv["name"] == key_name:
                     encrypted = priv.get("encrypted", False)
@@ -55,22 +68,30 @@ class FoxVisualizer:
                 "radius": 10 + (r["percentage"] / 10),
                 "alerts": alerts_by_key.get(key_name, []),
             })
-            links.append({"source": "localhost", "target": key_id})
+            links.append({"source": "localhost", "target": key_id, "weight": 1})
 
-        seen = set()
+        # Count how many times each host appears (one entry per key type in known_hosts)
+        host_counts: dict = {}
+        host_meta: dict = {}
         for host in data.get("known_hosts", []):
-            host_id = f"host_{host['host']}"
-            if host_id not in seen:
-                seen.add(host_id)
-                nodes.append({
-                    "id": host_id,
-                    "label": host["host"],
-                    "type": "host",
-                    "is_hashed": host.get("is_hashed", False),
-                    "radius": 8,
-                    "alerts": [],
-                })
-            links.append({"source": "localhost", "target": host_id})
+            h = host["host"]
+            host_counts[h] = host_counts.get(h, 0) + 1
+            host_meta[h] = host
+
+        for h, meta in host_meta.items():
+            host_id = f"host_{h}"
+            cat = self._host_category(h)
+            nodes.append({
+                "id": host_id,
+                "label": h,
+                "type": "host",
+                "category": cat,
+                "is_hashed": meta.get("is_hashed", False),
+                "radius": 7,
+                "alerts": [],
+            })
+            links.append({"source": "localhost", "target": host_id,
+                          "weight": host_counts[h]})
 
         return {"nodes": nodes, "links": links}
 
@@ -298,7 +319,10 @@ class FoxVisualizer:
         <div class="legend-item"><span class="legend-tag"><span class="dot" style="background:#00d4ff;box-shadow:0 0 6px #00d4ff66"></span>Local Machine</span></div>
         <div class="legend-item"><span class="legend-tag"><span class="dot" style="background:#40ffaa"></span>Key — encrypted</span></div>
         <div class="legend-item"><span class="legend-tag"><span class="dot" style="background:#ff4d4d;box-shadow:0 0 6px #ff4d4d66"></span>Key — no passphrase</span></div>
-        <div class="legend-item"><span class="legend-tag"><span class="dot" style="background:#ff944d"></span>Known Host</span></div>
+        <div class="legend-item"><span class="legend-tag"><span class="dot" style="background:#ff944d"></span>Private host</span></div>
+        <div class="legend-item"><span class="legend-tag"><span class="dot" style="background:#ff6633"></span>External host</span></div>
+        <div class="legend-item"><span class="legend-tag"><span class="dot" style="background:#7a9fff"></span>Known service</span></div>
+        <div class="legend-item"><span class="legend-tag"><span class="dot" style="background:#5a6b7a"></span>Loopback</span></div>
     </div>
     <div id="details"></div>
     <div id="brand">
@@ -319,13 +343,29 @@ class FoxVisualizer:
         svg.call(d3.zoom().on("zoom", e => g.attr("transform", e.transform)));
         const g = svg.append("g");
 
+        function hostColor(d) {{
+            if (d.type === "origin") return "#00d4ff";
+            if (d.type === "key")    return d.encrypted ? "#40ffaa" : "#ff4d4d";
+            if (d.type === "host") {{
+                if (d.category === "loopback") return "#5a6b7a";
+                if (d.category === "service")  return "#7a9fff";
+                if (d.category === "external") return "#ff6633";
+                return "#ff944d";
+            }}
+            return "#999";
+        }}
+
         const sim = d3.forceSimulation(data.nodes)
-            .force("link", d3.forceLink(data.links).id(d => d.id).distance(180))
-            .force("charge", d3.forceManyBody().strength(-600))
-            .force("center", d3.forceCenter(W / 2, H / 2));
+            .force("link", d3.forceLink(data.links).id(d => d.id).distance(d => d.weight > 1 ? 160 : 200))
+            .force("charge", d3.forceManyBody().strength(-500))
+            .force("center", d3.forceCenter(W / 2, H / 2))
+            .force("collide", d3.forceCollide().radius(d => d.radius + 18).strength(0.8));
 
         const link = g.append("g").selectAll("line")
-            .data(data.links).enter().append("line").attr("class","link");
+            .data(data.links).enter().append("line")
+            .attr("class","link")
+            .style("stroke-width", d => d.weight > 2 ? 2 : d.weight > 1 ? 1.5 : 1)
+            .style("stroke-opacity", d => d.weight > 1 ? 0.7 : 0.4);
 
         const node = g.append("g").selectAll("g")
             .data(data.nodes).enter().append("g").attr("class","node")
@@ -339,6 +379,9 @@ class FoxVisualizer:
                 h += "<h3>" + esc(d.type) + "</h3>";
                 h += "<div class='row'><span>Label</span><span>" + esc(d.label) + "</span></div>";
 
+                if (d.type === "host") {{
+                    h += "<div class='row'><span>Category</span><span>" + esc(d.category || "unknown") + "</span></div>";
+                }}
                 if (d.type === "key") {{
                     h += "<div class='row'><span>Type</span><span>" + esc(d.key_type) + "</span></div>";
                     h += "<div class='row'><span>Passphrase</span><span>" + (d.encrypted ? "✓ encrypted" : "✗ none") + "</span></div>";
@@ -366,12 +409,7 @@ class FoxVisualizer:
 
         node.append("circle")
             .attr("r", d => d.radius)
-            .attr("fill", d => {{
-                if (d.type === "origin") return "#00d4ff";
-                if (d.type === "host")   return "#ff944d";
-                if (d.type === "key")    return d.encrypted ? "#40ffaa" : "#ff4d4d";
-                return "#999";
-            }})
+            .attr("fill", hostColor)
             .style("filter", d => {{
                 if (d.type === "origin")
                     return "drop-shadow(0 0 12px rgba(0,212,255,0.5))";
@@ -383,9 +421,24 @@ class FoxVisualizer:
                 return "none";
             }});
 
+        // Text background rect for readability
+        node.append("rect")
+            .attr("x", d => d.radius + 5)
+            .attr("y", "-7")
+            .attr("height", "14")
+            .attr("rx", "2")
+            .attr("fill", "#050a0f")
+            .attr("fill-opacity", "0.65")
+            .attr("width", d => d.label.length * 6.2 + 6);
+
         node.append("text")
-            .attr("dx", d => d.radius + 6)
+            .attr("dx", d => d.radius + 8)
             .attr("dy", ".35em")
+            .attr("fill", d => {{
+                if (d.type === "origin") return "#00d4ff";
+                if (d.type === "key")    return d.encrypted ? "#40ffaa" : "#ff4d4d";
+                return "#8a9baa";
+            }})
             .text(d => d.label);
 
         sim.on("tick", () => {{
