@@ -1,6 +1,7 @@
 import json
 import os
 import webbrowser
+from datetime import datetime
 
 
 class FoxVisualizer:
@@ -92,6 +93,7 @@ class FoxVisualizer:
 
         os.makedirs(os.path.dirname(self.output_path), exist_ok=True)
 
+        generated = datetime.now().strftime("%Y-%m-%d %H:%M")
         html = f"""<!DOCTYPE html>
 <html>
 <head>
@@ -100,38 +102,189 @@ class FoxVisualizer:
     <script src="https://d3js.org/d3.v7.min.js"></script>
     <style>
         * {{ box-sizing: border-box; }}
-        body {{ background: #050a0f; color: #e0e0e0; font-family: 'Segoe UI', Tahoma, sans-serif; margin: 0; overflow: hidden; }}
-        .node circle {{ stroke: #1a2a3a; stroke-width: 2px; }}
-        .node text {{ fill: #e0e0e0; font-size: 11px; pointer-events: none; text-shadow: 1px 1px 2px #000; }}
-        .link {{ stroke: #1a2a3a; stroke-opacity: 0.4; stroke-width: 1.2px; }}
-        #header {{ position: absolute; top: 20px; left: 20px; z-index: 10; }}
-        #header h1 {{ font-family: 'Courier New', monospace; letter-spacing: 2px; margin: 0; color: #00d4ff; text-shadow: 0 0 10px #00d4ff44; }}
-        #header p {{ font-size: 0.8em; color: #5a6b7a; margin: 4px 0 0 0; }}
+        body {{
+            background: #050a0f;
+            color: #e0e0e0;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            margin: 0;
+            overflow: hidden;
+        }}
+        body::before {{
+            content: '';
+            position: fixed;
+            inset: 0;
+            background-image:
+                linear-gradient(rgba(0,212,255,0.025) 1px, transparent 1px),
+                linear-gradient(90deg, rgba(0,212,255,0.025) 1px, transparent 1px);
+            background-size: 48px 48px;
+            pointer-events: none;
+            z-index: 0;
+        }}
+        .node circle {{ stroke: #1a2a3a; stroke-width: 1.5px; }}
+        .node text {{
+            fill: #8a9baa;
+            font-size: 10px;
+            font-family: 'Courier New', monospace;
+            pointer-events: none;
+            text-shadow: 0 1px 3px #000;
+        }}
+        .link {{ stroke: #1a2a3a; stroke-opacity: 0.6; stroke-width: 1px; }}
+        #header {{ position: absolute; top: 24px; left: 24px; z-index: 10; }}
+        #header h1 {{
+            font-family: 'Courier New', monospace;
+            letter-spacing: 3px;
+            font-size: 1.05em;
+            margin: 0;
+            color: #00d4ff;
+            text-shadow: 0 0 20px #00d4ff44;
+            text-transform: uppercase;
+        }}
+        #header p {{
+            font-family: 'Courier New', monospace;
+            font-size: 0.7em;
+            color: #5a6b7a;
+            margin: 6px 0 0 0;
+            letter-spacing: 1px;
+        }}
         #risk-badge {{
-            display: inline-block; margin-top: 8px;
-            background: {risk_color}22; color: {risk_color};
-            border: 1px solid {risk_color}66; border-radius: 4px;
-            font-family: 'Courier New', monospace; font-size: 0.75em;
-            padding: 3px 10px; letter-spacing: 1px;
+            display: inline-block;
+            margin-top: 10px;
+            background: {risk_color}12;
+            color: {risk_color};
+            border: 1px solid {risk_color}44;
+            border-radius: 4px;
+            font-family: 'Courier New', monospace;
+            font-size: 0.7em;
+            padding: 4px 12px;
+            letter-spacing: 2px;
+            text-transform: uppercase;
         }}
         #details {{
-            position: absolute; bottom: 20px; right: 20px;
-            background: rgba(13,20,27,0.96); padding: 20px;
-            border: 1px solid #1a2a3a; border-radius: 8px;
-            width: 330px; display: none; z-index: 10;
-            box-shadow: 0 4px 20px rgba(0,0,0,0.6);
+            position: absolute;
+            bottom: 24px;
+            right: 24px;
+            background: #0d141b;
+            padding: 22px;
+            border: 1px solid #1a2a3a;
+            border-radius: 8px;
+            width: 350px;
+            display: none;
+            z-index: 10;
+            box-shadow: 0 4px 30px rgba(0,0,0,0.8);
+            transition: border-color 0.3s ease;
         }}
-        #details h3 {{ margin: 0 0 10px 0; color: #00d4ff; font-size: 0.85em; letter-spacing: 1px; }}
-        #details .row {{ display: flex; justify-content: space-between; font-size: 0.8em; margin-bottom: 4px; color: #8a9baa; }}
-        #details .row span:last-child {{ color: #e0e0e0; }}
-        #details .alert-HIGH   {{ color: #ff4d4d; font-size: 0.78em; margin-top: 4px; }}
-        #details .alert-MEDIUM {{ color: #ffaa4d; font-size: 0.78em; margin-top: 4px; }}
-        #details .alert-LOW    {{ color: #ffdd4d; font-size: 0.78em; margin-top: 4px; }}
-        .legend {{ position: absolute; top: 20px; right: 20px; font-size: 12px; z-index: 10; }}
-        .legend-item {{ display: flex; align-items: center; margin-bottom: 6px; color: #8a9baa; }}
-        .dot {{ width: 12px; height: 12px; border-radius: 50%; margin-right: 12px; flex-shrink: 0; }}
-        .close-btn {{ float: right; cursor: pointer; color: #5a6b7a; font-size: 0.8em; }}
-        .close-btn:hover {{ color: #00d4ff; }}
+        #details:hover {{ border-color: #00d4ff22; }}
+        #details h3 {{
+            margin: 0 0 14px 0;
+            color: #00d4ff;
+            font-family: 'Courier New', monospace;
+            font-size: 0.72em;
+            letter-spacing: 2px;
+            text-transform: uppercase;
+            border-bottom: 1px solid #1a2a3a;
+            padding-bottom: 10px;
+        }}
+        #details .row {{
+            display: flex;
+            justify-content: space-between;
+            font-size: 0.78em;
+            margin-bottom: 6px;
+            align-items: baseline;
+        }}
+        #details .row span:first-child {{
+            color: #5a6b7a;
+            font-family: 'Courier New', monospace;
+            font-size: 0.88em;
+            letter-spacing: 0.5px;
+            flex-shrink: 0;
+        }}
+        #details .row span:last-child {{ color: #e0e0e0; text-align: right; margin-left: 12px; }}
+        .alerts-header {{
+            color: #5a6b7a;
+            font-family: 'Courier New', monospace;
+            font-size: 0.65em;
+            letter-spacing: 2px;
+            text-transform: uppercase;
+            margin: 14px 0 8px 0;
+            border-top: 1px solid #1a2a3a;
+            padding-top: 12px;
+        }}
+        .alert-badge {{
+            display: inline-block;
+            font-family: 'Courier New', monospace;
+            font-size: 0.65em;
+            border-radius: 3px;
+            padding: 2px 7px;
+            letter-spacing: 1px;
+            margin-bottom: 3px;
+        }}
+        .badge-HIGH   {{ background: #ff4d4d18; color: #ff4d4d; border: 1px solid #ff4d4d44; }}
+        .badge-MEDIUM {{ background: #ffaa4d18; color: #ffaa4d; border: 1px solid #ffaa4d44; }}
+        .badge-LOW    {{ background: #ffdd4d18; color: #ffdd4d; border: 1px solid #ffdd4d44; }}
+        .alert-msg {{ font-size: 0.77em; color: #c0c8d0; margin: 3px 0 4px 0; line-height: 1.45; }}
+        .alert-fix {{
+            font-size: 0.72em;
+            color: #40ffaa;
+            margin: 2px 0 10px 0;
+            padding-left: 8px;
+            border-left: 2px solid #40ffaa44;
+            line-height: 1.4;
+        }}
+        .close-btn {{
+            float: right;
+            cursor: pointer;
+            color: #5a6b7a;
+            font-family: 'Courier New', monospace;
+            font-size: 0.68em;
+            letter-spacing: 1px;
+            padding: 2px 7px;
+            border: 1px solid #1a2a3a;
+            border-radius: 3px;
+            transition: all 0.2s;
+        }}
+        .close-btn:hover {{ color: #00d4ff; border-color: #00d4ff44; }}
+        .legend {{
+            position: absolute;
+            top: 24px;
+            right: 24px;
+            z-index: 10;
+        }}
+        .legend-title {{
+            color: #5a6b7a;
+            font-family: 'Courier New', monospace;
+            font-size: 0.62em;
+            letter-spacing: 2px;
+            text-transform: uppercase;
+            margin-bottom: 10px;
+        }}
+        .legend-item {{ margin-bottom: 7px; }}
+        .legend-tag {{
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            font-family: 'Courier New', monospace;
+            font-size: 0.68em;
+            background: #0d141b;
+            border: 1px solid #1a2a3a;
+            border-radius: 4px;
+            padding: 4px 10px;
+            color: #8a9baa;
+            letter-spacing: 0.5px;
+        }}
+        .dot {{ width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }}
+        #brand {{
+            position: absolute;
+            bottom: 24px;
+            left: 24px;
+            font-family: 'Courier New', monospace;
+            font-size: 0.62em;
+            color: #1a2a3a;
+            letter-spacing: 1px;
+            z-index: 10;
+            line-height: 1.8;
+        }}
+        #brand a {{ color: #2a3a4a; text-decoration: none; }}
+        #brand a:hover {{ color: #00d4ff; }}
     </style>
 </head>
 <body>
@@ -141,12 +294,17 @@ class FoxVisualizer:
         <div id="risk-badge">RISK SCORE: {risk_score}/100 — {risk_label}</div>
     </div>
     <div class="legend">
-        <div class="legend-item"><div class="dot" style="background:#00d4ff"></div>Local Machine</div>
-        <div class="legend-item"><div class="dot" style="background:#40ffaa"></div>Key — encrypted</div>
-        <div class="legend-item"><div class="dot" style="background:#ff4d4d"></div>Key — no passphrase</div>
-        <div class="legend-item"><div class="dot" style="background:#ff944d"></div>Known Host</div>
+        <div class="legend-title">Legend</div>
+        <div class="legend-item"><span class="legend-tag"><span class="dot" style="background:#00d4ff;box-shadow:0 0 6px #00d4ff66"></span>Local Machine</span></div>
+        <div class="legend-item"><span class="legend-tag"><span class="dot" style="background:#40ffaa"></span>Key — encrypted</span></div>
+        <div class="legend-item"><span class="legend-tag"><span class="dot" style="background:#ff4d4d;box-shadow:0 0 6px #ff4d4d66"></span>Key — no passphrase</span></div>
+        <div class="legend-item"><span class="legend-tag"><span class="dot" style="background:#ff944d"></span>Known Host</span></div>
     </div>
     <div id="details"></div>
+    <div id="brand">
+        Generated {generated}<br>
+        <a href="https://shadowfox.se" target="_blank">shadowfox.se</a>
+    </div>
     <script>
         const data = {json.dumps(graph)};
         const W = window.innerWidth, H = window.innerHeight;
@@ -162,8 +320,8 @@ class FoxVisualizer:
         const g = svg.append("g");
 
         const sim = d3.forceSimulation(data.nodes)
-            .force("link", d3.forceLink(data.links).id(d => d.id).distance(200))
-            .force("charge", d3.forceManyBody().strength(-500))
+            .force("link", d3.forceLink(data.links).id(d => d.id).distance(180))
+            .force("charge", d3.forceManyBody().strength(-600))
             .force("center", d3.forceCenter(W / 2, H / 2));
 
         const link = g.append("g").selectAll("line")
@@ -178,7 +336,7 @@ class FoxVisualizer:
             .on("click", (event,d) => {{
                 const panel = d3.select("#details");
                 let h = "<span class='close-btn' onclick='document.getElementById(&quot;details&quot;).style.display=&quot;none&quot;'>✕ close</span>";
-                h += "<h3>" + esc(d.type.toUpperCase()) + "</h3>";
+                h += "<h3>" + esc(d.type) + "</h3>";
                 h += "<div class='row'><span>Label</span><span>" + esc(d.label) + "</span></div>";
 
                 if (d.type === "key") {{
@@ -194,11 +352,12 @@ class FoxVisualizer:
                     h += "<div class='row'><span>Risk Score</span><span>" + esc(d.risk_score) + "/100</span></div>";
                 }}
                 if (d.alerts && d.alerts.length > 0) {{
-                    h += "<br>";
+                    h += "<div class='alerts-header'>Alerts &amp; Remediations</div>";
                     d.alerts.forEach(a => {{
-                        h += "<div class='alert-" + esc(a.level) + "'>[" + esc(a.level) + "] " + esc(a.message) + "</div>";
+                        h += "<span class='alert-badge badge-" + esc(a.level) + "'>" + esc(a.level) + "</span>";
+                        h += "<div class='alert-msg'>" + esc(a.message) + "</div>";
                         if (a.remediation) {{
-                            h += "<div style='color:#5affb0;font-size:0.75em;margin:2px 0 6px 12px'>→ Fix: " + esc(a.remediation) + "</div>";
+                            h += "<div class='alert-fix'>→ " + esc(a.remediation) + "</div>";
                         }}
                     }});
                 }}
@@ -214,16 +373,18 @@ class FoxVisualizer:
                 return "#999";
             }})
             .style("filter", d => {{
+                if (d.type === "origin")
+                    return "drop-shadow(0 0 12px rgba(0,212,255,0.5))";
                 const hasHighAlert = d.alerts && d.alerts.some(a => a.level === "HIGH");
                 if (hasHighAlert || (d.type === "key" && !d.encrypted))
-                    return "drop-shadow(0 0 8px rgba(255,77,77,0.7))";
+                    return "drop-shadow(0 0 10px rgba(255,77,77,0.7))";
                 if (d.type === "key" && d.blast_radius > 50)
-                    return "drop-shadow(0 0 6px rgba(255,170,77,0.5))";
+                    return "drop-shadow(0 0 8px rgba(255,170,77,0.5))";
                 return "none";
             }});
 
         node.append("text")
-            .attr("dx", d => d.radius + 5)
+            .attr("dx", d => d.radius + 6)
             .attr("dy", ".35em")
             .text(d => d.label);
 
