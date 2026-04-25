@@ -204,6 +204,7 @@ class TestPassphraseAlert(unittest.TestCase):
         h._generate_alerts()
         highs = [a for a in h.results["risk_alerts"] if a["level"] == "HIGH"]
         self.assertTrue(any("passphrase" in a["message"] for a in highs))
+        self.assertTrue(any(a.get("remediation") for a in highs))
 
     def test_no_passphrase_alert_for_encrypted_key(self):
         h = SSHHarvester()

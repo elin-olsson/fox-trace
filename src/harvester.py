@@ -251,18 +251,21 @@ class SSHHarvester:
             alerts.append({
                 "level": "HIGH", "key": None,
                 "message": f"~/.ssh directory permissions are {self.results['dir_permissions']} — should be 700.",
+                "remediation": "Run: chmod 700 ~/.ssh",
             })
 
         if self.results["active_agents"]:
             alerts.append({
                 "level": "MEDIUM", "key": None,
                 "message": "Active SSH agent sockets found. Potential session hijacking risk.",
+                "remediation": "Kill stale agents: ssh-add -D && pkill ssh-agent",
             })
 
         for host in self.results["forward_agent_hosts"]:
             alerts.append({
                 "level": "MEDIUM", "key": None,
                 "message": f"ForwardAgent enabled for '{host}' — your agent keys are exposed to that server.",
+                "remediation": f"Remove 'ForwardAgent yes' for '{host}' in ~/.ssh/config. Use ProxyJump instead.",
             })
 
         for priv in self.results["private_keys"]:
@@ -272,24 +275,28 @@ class SSHHarvester:
                 alerts.append({
                     "level": "HIGH", "key": name,
                     "message": f"Key '{name}' has permissions {priv.get('permissions', '???')} — should be 600.",
+                    "remediation": f"Run: chmod 600 ~/.ssh/{name}",
                 })
 
             if not priv.get("encrypted"):
                 alerts.append({
                     "level": "HIGH", "key": name,
                     "message": f"Key '{name}' has no passphrase — usable immediately if stolen.",
+                    "remediation": f"Add a passphrase: ssh-keygen -p -f ~/.ssh/{name}",
                 })
 
             if priv.get("key_type") == "DSA":
                 alerts.append({
                     "level": "HIGH", "key": name,
                     "message": f"Key '{name}' is DSA — deprecated, fixed 1024-bit, cryptographically broken.",
+                    "remediation": "Generate a new key: ssh-keygen -t ed25519 -f ~/.ssh/id_ed25519. Update authorized_keys on all servers, then delete the DSA key.",
                 })
 
             if priv["age_days"] > self.stale_days:
                 alerts.append({
                     "level": "LOW", "key": name,
                     "message": f"Key '{name}' is stale ({priv['age_days']} days old).",
+                    "remediation": f"Review whether '{name}' is still in use. Rotate with: ssh-keygen -t ed25519. Remove old key from all authorized_keys.",
                 })
 
             r = self.results["blast_radius"].get(name, {})
@@ -298,6 +305,7 @@ class SSHHarvester:
                 alerts.append({
                     "level": "HIGH", "key": name,
                     "message": f"Key '{name}' blast radius {r['percentage']}% — {r['count']} hosts{conf_note}.",
+                    "remediation": "Use per-host keys in ~/.ssh/config (IdentityFile). Audit and remove this key from authorized_keys on servers where it is no longer needed.",
                 })
 
     def _compute_risk_score(self):
@@ -482,9 +490,11 @@ def _print_results(findings, github_user=None):
             print(f"  {key} → {r['count']} hosts ({r['percentage']}%){conf}")
 
     if findings["risk_alerts"]:
-        print("\n--- Risk Alerts ---")
+        print("\n--- Risk Alerts & Remediations ---")
         for alert in findings["risk_alerts"]:
             print(f"  [{alert['level']:6}] {alert['message']}")
+            if alert.get("remediation"):
+                print(f"           → Fix: {alert['remediation']}")
 
     if findings.get("forward_agent_hosts"):
         print("\n--- ForwardAgent ---")

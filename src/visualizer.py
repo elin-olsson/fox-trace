@@ -177,7 +177,7 @@ class FoxVisualizer:
                 .on("end",   (e,d) => {{ if(!e.active) sim.alphaTarget(0); d.fx=null; d.fy=null; }}))
             .on("click", (event,d) => {{
                 const panel = d3.select("#details");
-                let h = "<span class='close-btn' onclick=\"document.getElementById('details').style.display='none'\">✕ close</span>";
+                let h = "<span class='close-btn' onclick='document.getElementById(&quot;details&quot;).style.display=&quot;none&quot;'>✕ close</span>";
                 h += "<h3>" + esc(d.type.toUpperCase()) + "</h3>";
                 h += "<div class='row'><span>Label</span><span>" + esc(d.label) + "</span></div>";
 
@@ -197,6 +197,9 @@ class FoxVisualizer:
                     h += "<br>";
                     d.alerts.forEach(a => {{
                         h += "<div class='alert-" + esc(a.level) + "'>[" + esc(a.level) + "] " + esc(a.message) + "</div>";
+                        if (a.remediation) {{
+                            h += "<div style='color:#5affb0;font-size:0.75em;margin:2px 0 6px 12px'>→ Fix: " + esc(a.remediation) + "</div>";
+                        }}
                     }});
                 }}
                 panel.style("display","block").html(h);
