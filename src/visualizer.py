@@ -8,17 +8,27 @@ class FoxVisualizer:
         self.output_path = "data/shadow_map.html"
 
     def _prepare_graph_data(self, data):
-        nodes = [{"id": "localhost", "label": "Local Machine", "type": "origin"}]
+        nodes = [{"id": "localhost", "label": "Local Machine", "type": "origin", "radius": 15}]
         links = []
+        blast_data = data.get("blast_radius", {})
 
         # Add Keys as nodes and link to localhost
         for key in data.get("public_keys", []):
+            key_name = key['name'].replace(".pub", "")
             key_id = f"key_{key['fingerprint']}"
+            
+            # Get blast radius info
+            radius_info = blast_data.get(key_name, {"percentage": 0, "count": 0})
+            
             nodes.append({
                 "id": key_id, 
                 "label": f"Key: {key['name']}", 
                 "type": "key",
-                "comment": key.get("comment", "")
+                "comment": key.get("comment", ""),
+                "blast_radius": radius_info["percentage"],
+                "blast_count": radius_info["count"],
+                # Larger radius for higher blast radius
+                "radius": 10 + (radius_info["percentage"] / 10) 
             })
             links.append({"source": "localhost", "target": key_id})
 
@@ -30,14 +40,21 @@ class FoxVisualizer:
                     "id": host_id, 
                     "label": host['host'], 
                     "type": "host",
-                    "is_hashed": host.get("is_hashed", False)
+                    "is_hashed": host.get("is_hashed", False),
+                    "radius": 8
                 })
             links.append({"source": "localhost", "target": host_id})
 
         # Add Risk Alerts as nodes
         for i, alert in enumerate(data.get("risk_alerts", [])):
             alert_id = f"alert_{i}"
-            nodes.append({"id": alert_id, "label": alert['level'], "type": "alert", "msg": alert['message']})
+            nodes.append({
+                "id": alert_id, 
+                "label": alert['level'], 
+                "type": "alert", 
+                "msg": alert['message'],
+                "radius": 12
+            })
             links.append({"source": "localhost", "target": alert_id})
 
         return {"nodes": nodes, "links": links}
@@ -72,32 +89,37 @@ class FoxVisualizer:
             overflow: hidden;
         }}
         .node circle {{ stroke: #1a2a3a; stroke-width: 2px; }}
-        .node text {{ fill: #e0e0e0; font-size: 11px; pointer-events: none; }}
-        .link {{ stroke: #1a2a3a; stroke-opacity: 0.4; stroke-width: 1px; }}
+        .node text {{ fill: #e0e0e0; font-size: 11px; pointer-events: none; text-shadow: 1px 1px 2px #000; }}
+        .link {{ stroke: #1a2a3a; stroke-opacity: 0.4; stroke-width: 1.2px; }}
         #header {{ position: absolute; top: 20px; left: 20px; z-index: 10; }}
-        #header h1 {{ font-family: 'Courier New', monospace; letter-spacing: 2px; margin: 0; }}
+        #header h1 {{ font-family: 'Courier New', monospace; letter-spacing: 2px; margin: 0; text-shadow: 0 0 10px #00d4ff44; }}
         #header p {{ font-size: 0.8em; color: #5a6b7a; margin: 5px 0 0 0; }}
         #details {{ 
             position: absolute; bottom: 20px; right: 20px; 
-            background: rgba(13, 20, 27, 0.95); padding: 15px; 
+            background: rgba(13, 20, 27, 0.95); padding: 20px; 
             border: 1px solid #1a2a3a; border-radius: 8px;
             width: 320px; display: none; z-index: 10;
-            box-shadow: 0 4px 15px rgba(0,0,0,0.5);
+            box-shadow: 0 4px 20px rgba(0,0,0,0.6);
+            backdrop-filter: blur(5px);
         }}
         .legend {{ position: absolute; top: 20px; right: 20px; font-size: 12px; z-index: 10; }}
-        .legend-item {{ display: flex; align-items: center; margin-bottom: 5px; color: #8a9baa; }}
-        .dot {{ width: 10px; height: 10px; border-radius: 50%; margin-right: 10px; }}
+        .legend-item {{ display: flex; align-items: center; margin-bottom: 6px; color: #8a9baa; }}
+        .dot {{ width: 12px; height: 12px; border-radius: 50%; margin-right: 12px; }}
+        .blast-badge {{ 
+            background: #ff4d4d22; color: #ff4d4d; border: 1px solid #ff4d4d44;
+            padding: 2px 6px; border-radius: 4px; font-size: 0.8em; font-weight: bold;
+        }}
     </style>
 </head>
 <body>
     <div id="header">
         <h1>FOX-TRACE // SHADOW MAP</h1>
-        <p>SSH Trust & Lateral Movement Paths</p>
+        <p>SSH Trust & Blast Radius Analysis</p>
     </div>
 
     <div class="legend">
         <div class="legend-item"><div class="dot" style="background: #00d4ff;"></div> Local Machine</div>
-        <div class="legend-item"><div class="dot" style="background: #40ffaa;"></div> SSH Keys</div>
+        <div class="legend-item"><div class="dot" style="background: #40ffaa;"></div> SSH Keys (Size = Blast Radius)</div>
         <div class="legend-item"><div class="dot" style="background: #ff944d;"></div> Known Hosts</div>
         <div class="legend-item"><div class="dot" style="background: #ff4d4d;"></div> Risks/Alerts</div>
     </div>
@@ -113,7 +135,6 @@ class FoxVisualizer:
             .attr("width", width)
             .attr("height", height);
 
-        // Zoom and Pan support
         svg.call(d3.zoom().on("zoom", (event) => {{
             g.attr("transform", event.transform);
         }}));
@@ -121,8 +142,8 @@ class FoxVisualizer:
         const g = svg.append("g");
 
         const simulation = d3.forceSimulation(data.nodes)
-            .force("link", d3.forceLink(data.links).id(d => d.id).distance(180))
-            .force("charge", d3.forceManyBody().strength(-400))
+            .force("link", d3.forceLink(data.links).id(d => d.id).distance(200))
+            .force("charge", d3.forceManyBody().strength(-500))
             .force("center", d3.forceCenter(width / 2, height / 2));
 
         const link = g.append("g")
@@ -144,15 +165,25 @@ class FoxVisualizer:
                 .on("end", dragended))
             .on("click", (event, d) => {{
                 const details = d3.select("#details");
-                details.style("display", "block")
-                    .html("<h3 style='margin:0 0 10px 0; color:#00d4ff'>" + d.type.toUpperCase() + "</h3>" +
-                          "<strong>Label:</strong> " + d.label + "<br>" + 
-                          "<strong>ID:</strong> <code style='font-size:0.9em'>" + d.id + "</code>" + 
-                          (d.msg ? "<br><br><span style='color:#ff4d4d'><strong>ALERT:</strong> " + d.msg + "</span>" : ""));
+                let html = "<h3 style='margin:0 0 10px 0; color:#00d4ff'>" + d.type.toUpperCase() + "</h3>";
+                html += "<strong>Label:</strong> " + d.label + "<br>";
+                
+                if (d.type === "key") {{
+                    html += "<strong>Blast Radius:</strong> " + d.blast_radius + "% (" + d.blast_count + " hosts)<br>";
+                    if (d.blast_radius > 50) {{
+                        html += "<span class='blast-badge'>HIGH EXPOSURE</span><br>";
+                    }}
+                }}
+                
+                if (d.msg) {{
+                    html += "<br><span style='color:#ff4d4d'><strong>ALERT:</strong> " + d.msg + "</span>";
+                }}
+                
+                details.style("display", "block").html(html);
             }});
 
         node.append("circle")
-            .attr("r", 12)
+            .attr("r", d => d.radius)
             .attr("fill", d => {{
                 if (d.type === "origin") return "#00d4ff";
                 if (d.type === "key") return "#40ffaa";
@@ -160,10 +191,10 @@ class FoxVisualizer:
                 if (d.type === "alert") return "#ff4d4d";
                 return "#999";
             }})
-            .style("filter", "drop-shadow(0 0 5px rgba(0,212,255,0.3))");
+            .style("filter", d => d.type === "alert" || (d.type === "key" && d.blast_radius > 50) ? "drop-shadow(0 0 8px rgba(255,77,77,0.5))" : "none");
 
         node.append("text")
-            .attr("dx", 18)
+            .attr("dx", d => d.radius + 5)
             .attr("dy", ".35em")
             .text(d => d.label);
 
@@ -201,14 +232,13 @@ class FoxVisualizer:
         with open(self.output_path, "w") as f:
             f.write(html_template)
         
-        print(f"\n[SUCCESS] Shadow Map generated: {self.output_path}")
+        print(f"\n[SUCCESS] Shadow Map (Blast Radius Enhanced) generated: {self.output_path}")
         
-        # Automatically open in browser
         try:
             full_path = "file://" + os.path.abspath(self.output_path)
             webbrowser.open(full_path)
         except Exception:
-            print("[!] Could not open browser automatically. Please open data/shadow_map.html manually.")
+            pass
             
         return True
 
