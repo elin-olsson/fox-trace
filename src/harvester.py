@@ -1,23 +1,23 @@
 import os
+import re
 import hashlib
 import base64
 import urllib.request
 import json
 import time
-import re
 import argparse
 from pathlib import Path
 
 
 def _compute_fingerprint(key_string):
-    """Compute MD5 fingerprint from a public key string."""
+    """Compute SHA256 fingerprint matching ssh-keygen -lf output."""
     try:
         parts = key_string.split()
         if len(parts) < 2:
             return None
         key_data = base64.b64decode(parts[1])
-        fp_plain = hashlib.md5(key_data).hexdigest()
-        return ":".join(fp_plain[i:i+2] for i in range(0, len(fp_plain), 2))
+        digest = hashlib.sha256(key_data).digest()
+        return "SHA256:" + base64.b64encode(digest).rstrip(b"=").decode()
     except Exception:
         return None
 
@@ -29,19 +29,18 @@ class IdentityMatcher:
     def fetch_github_keys(self, username):
         if username in self._cache:
             return self._cache[username]
-        url = f"https://api.github.com/users/{username}/keys"
         try:
-            with urllib.request.urlopen(url, timeout=10) as response:
-                keys_data = json.loads(response.read().decode())
-                fps = [_compute_fingerprint(k["key"]) for k in keys_data]
+            url = f"https://api.github.com/users/{username}/keys"
+            with urllib.request.urlopen(url, timeout=10) as r:
+                data = json.loads(r.read().decode())
+                fps = [_compute_fingerprint(k["key"]) for k in data]
                 self._cache[username] = [fp for fp in fps if fp]
                 return self._cache[username]
         except Exception as e:
-            print(f"Error fetching GitHub keys for {username}: {e}")
+            print(f"  Error fetching GitHub keys for {username}: {e}")
             return []
 
     def match_against_local(self, username, local_keys):
-        """Return local keys whose fingerprints appear in the GitHub user's key set."""
         github_fps = set(self.fetch_github_keys(username))
         return [
             {"github_user": username, "fingerprint": k["fingerprint"],
@@ -52,8 +51,16 @@ class IdentityMatcher:
 
 
 class SSHHarvester:
+
+    _KEY_MARKERS = {
+        "BEGIN RSA PRIVATE KEY":     "RSA",
+        "BEGIN EC PRIVATE KEY":      "ECDSA",
+        "BEGIN DSA PRIVATE KEY":     "DSA",
+        "BEGIN OPENSSH PRIVATE KEY": "OpenSSH",
+    }
+
     def __init__(self, ssh_dir=None, stale_days=180):
-        self.ssh_dir = ssh_dir or os.path.expanduser("~/.ssh")
+        self.ssh_dir = Path(ssh_dir or os.path.expanduser("~/.ssh"))
         self.stale_days = stale_days
         self.results = {
             "private_keys": [],
@@ -61,18 +68,58 @@ class SSHHarvester:
             "authorized_keys": [],
             "known_hosts": [],
             "config_entries": [],
+            "forward_agent_hosts": [],
             "active_agents": [],
+            "dir_permissions": None,
+            "risk_score": 0,
             "risk_alerts": [],
             "blast_radius": {},
-            "github_matches": []
+            "github_matches": [],
         }
 
-    def _get_file_age_days(self, file_path):
+    # ── Low-level helpers ─────────────────────────────────────────────────────
+
+    def _get_file_age_days(self, path):
         try:
-            mtime = os.path.getmtime(file_path)
-            return int((time.time() - mtime) / (24 * 3600))
+            return int((time.time() - os.path.getmtime(path)) / 86400)
         except Exception:
             return 0
+
+    def _get_permissions(self, path):
+        try:
+            return oct(os.stat(path).st_mode)[-3:]
+        except Exception:
+            return "???"
+
+    def _detect_key_type(self, content):
+        for marker, ktype in self._KEY_MARKERS.items():
+            if marker in content:
+                return ktype
+        return "Unknown"
+
+    def _is_key_encrypted(self, path):
+        """Return True if the private key is passphrase-protected."""
+        try:
+            content = path.read_text(errors="ignore")
+            # Old PEM format
+            if "Proc-Type: 4,ENCRYPTED" in content or "DEK-Info:" in content:
+                return True
+            # New OpenSSH format — check cipher field in binary header
+            if "BEGIN OPENSSH PRIVATE KEY" in content:
+                b64 = re.sub(r"-----.+?-----|[ \t\n\r]", "", content)
+                raw = base64.b64decode(b64 + "==")
+                # "openssh-key-v1\0" magic = 15 bytes
+                offset = 15
+                if len(raw) > offset + 4:
+                    clen = int.from_bytes(raw[offset:offset + 4], "big")
+                    if len(raw) >= offset + 4 + clen:
+                        cipher = raw[offset + 4:offset + 4 + clen].decode("ascii", errors="replace")
+                        return cipher != "none"
+            return False
+        except Exception:
+            return False
+
+    # ── Parsers ───────────────────────────────────────────────────────────────
 
     def _detect_agents(self):
         agents = []
@@ -83,7 +130,7 @@ class SSHHarvester:
                     agents.append({
                         "path": str(sock),
                         "owner_uid": st.st_uid,
-                        "permissions": oct(st.st_mode)[-3:]
+                        "permissions": oct(st.st_mode)[-3:],
                     })
                 except Exception:
                     continue
@@ -91,159 +138,298 @@ class SSHHarvester:
             pass
         return agents
 
-    def _parse_ssh_config(self, file_path):
+    def _parse_ssh_config(self, path):
         entries = []
+        forward_hosts = []
         current_host = None
+        forward_agent = False
         try:
-            with open(file_path) as f:
-                for line in f:
-                    line = line.strip()
-                    if not line or line.startswith("#"):
-                        continue
-                    m = re.match(r"(?i)^Host\s+(.+)", line)
-                    if m:
-                        current_host = m.group(1)
-                        continue
-                    m = re.match(r"(?i)^IdentityFile\s+(.+)", line)
-                    if m and current_host:
-                        entries.append({
-                            "host_pattern": current_host,
-                            "identity_file": m.group(1).replace("~", os.path.expanduser("~"))
-                        })
+            for line in path.read_text().splitlines():
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                m = re.match(r"(?i)^Host\s+(.+)", line)
+                if m:
+                    if current_host and forward_agent:
+                        forward_hosts.append(current_host)
+                    current_host = m.group(1)
+                    forward_agent = False
+                    continue
+                m = re.match(r"(?i)^IdentityFile\s+(.+)", line)
+                if m and current_host:
+                    entries.append({
+                        "host_pattern": current_host,
+                        "identity_file": m.group(1).replace("~", str(Path.home())),
+                    })
+                if re.match(r"(?i)^ForwardAgent\s+yes\b", line):
+                    forward_agent = True
+            if current_host and forward_agent:
+                forward_hosts.append(current_host)
         except Exception:
             pass
-        return entries
+        return entries, forward_hosts
 
-    def _parse_known_hosts(self, file_path):
+    def _parse_known_hosts(self, path):
         hosts = []
         try:
-            with open(file_path) as f:
-                for line in f:
-                    line = line.strip()
-                    if not line or line.startswith("#"):
-                        continue
-                    parts = line.split()
-                    if not parts:
-                        continue
-                    is_hashed = parts[0].startswith("|1|")
-                    hosts.append({
-                        "host": "HASHED_ADDR" if is_hashed else parts[0],
-                        "is_hashed": is_hashed,
-                        "key_type": parts[1] if len(parts) > 1 else "Unknown"
-                    })
+            for line in path.read_text().splitlines():
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                parts = line.split()
+                if not parts:
+                    continue
+                is_hashed = parts[0].startswith("|1|")
+                hosts.append({
+                    "host": "HASHED_ADDR" if is_hashed else parts[0],
+                    "is_hashed": is_hashed,
+                    "key_type": parts[1] if len(parts) > 1 else "Unknown",
+                })
         except Exception:
             pass
         return hosts
 
-    def _parse_authorized_keys(self, file_path):
+    def _parse_authorized_keys(self, path):
         keys = []
         try:
-            with open(file_path) as f:
-                for line in f:
-                    line = line.strip()
-                    if not line or line.startswith("#"):
-                        continue
-                    parts = line.split()
-                    keys.append({
-                        "fingerprint": _compute_fingerprint(line),
-                        "comment": parts[-1] if len(parts) > 2 else "None",
-                        "source": "authorized_keys"
-                    })
+            for line in path.read_text().splitlines():
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                parts = line.split()
+                keys.append({
+                    "fingerprint": _compute_fingerprint(line),
+                    "comment": parts[-1] if len(parts) > 2 else "None",
+                    "source": "authorized_keys",
+                })
         except Exception:
             pass
         return keys
 
+    # ── Analysis ──────────────────────────────────────────────────────────────
+
     def _calculate_blast_radius(self):
         radius = {}
         all_hosts = [h["host"] for h in self.results["known_hosts"]]
+        if not all_hosts:
+            return radius
+
+        # Build config-confirmed mappings
+        config_map = {}
+        for entry in self.results["config_entries"]:
+            key_name = Path(entry["identity_file"]).name
+            config_map.setdefault(key_name, [])
+            if entry["host_pattern"] == "*":
+                config_map[key_name] = list(all_hosts)
+            else:
+                config_map[key_name].append(entry["host_pattern"])
+
         for priv in self.results["private_keys"]:
-            accessible = []
-            for entry in self.results["config_entries"]:
-                mapped = (entry["identity_file"] == priv["path"] or
-                          Path(entry["identity_file"]).name == priv["name"])
-                if mapped:
-                    if entry["host_pattern"] == "*":
-                        accessible = all_hosts
-                        break
-                    else:
-                        accessible.append(entry["host_pattern"])
-            if not accessible:
-                accessible = all_hosts
-            radius[priv["name"]] = {
+            name = priv["name"]
+            if name in config_map:
+                accessible = config_map[name]
+                confidence = "confirmed"
+            else:
+                accessible = list(all_hosts)
+                confidence = "potential"
+            radius[name] = {
                 "count": len(accessible),
-                "percentage": round((len(accessible) / len(all_hosts) * 100) if all_hosts else 0, 1),
-                "targets": accessible[:10]
+                "percentage": round(len(accessible) / len(all_hosts) * 100, 1),
+                "targets": accessible[:10],
+                "confidence": confidence,
             }
         return radius
 
+    def _generate_alerts(self):
+        alerts = self.results["risk_alerts"]
+
+        if self.results["dir_permissions"] not in ("700", None):
+            alerts.append({
+                "level": "HIGH", "key": None,
+                "message": f"~/.ssh directory permissions are {self.results['dir_permissions']} — should be 700.",
+            })
+
+        if self.results["active_agents"]:
+            alerts.append({
+                "level": "MEDIUM", "key": None,
+                "message": "Active SSH agent sockets found. Potential session hijacking risk.",
+            })
+
+        for host in self.results["forward_agent_hosts"]:
+            alerts.append({
+                "level": "MEDIUM", "key": None,
+                "message": f"ForwardAgent enabled for '{host}' — your agent keys are exposed to that server.",
+            })
+
+        for priv in self.results["private_keys"]:
+            name = priv["name"]
+
+            if priv.get("permissions") not in ("600", "400"):
+                alerts.append({
+                    "level": "HIGH", "key": name,
+                    "message": f"Key '{name}' has permissions {priv.get('permissions', '???')} — should be 600.",
+                })
+
+            if not priv.get("encrypted"):
+                alerts.append({
+                    "level": "HIGH", "key": name,
+                    "message": f"Key '{name}' has no passphrase — usable immediately if stolen.",
+                })
+
+            if priv.get("key_type") == "DSA":
+                alerts.append({
+                    "level": "HIGH", "key": name,
+                    "message": f"Key '{name}' is DSA — deprecated, fixed 1024-bit, cryptographically broken.",
+                })
+
+            if priv["age_days"] > self.stale_days:
+                alerts.append({
+                    "level": "LOW", "key": name,
+                    "message": f"Key '{name}' is stale ({priv['age_days']} days old).",
+                })
+
+            r = self.results["blast_radius"].get(name, {})
+            if r.get("percentage", 0) > 80:
+                conf_note = "" if r["confidence"] == "confirmed" else " (potential — no SSH config mapping)"
+                alerts.append({
+                    "level": "HIGH", "key": name,
+                    "message": f"Key '{name}' blast radius {r['percentage']}% — {r['count']} hosts{conf_note}.",
+                })
+
+    def _compute_risk_score(self):
+        """Aggregate 0–100 risk score for this system."""
+        score = 0
+        dir_perm = self.results["dir_permissions"]
+        if dir_perm and dir_perm != "700":
+            score += 10
+        if self.results["active_agents"]:
+            score += 10
+        score += len(self.results["forward_agent_hosts"]) * 10
+
+        for priv in self.results["private_keys"]:
+            if not priv.get("encrypted"):
+                score += 40
+            if priv.get("permissions") not in ("600", "400"):
+                score += 20
+            if priv.get("key_type") == "DSA":
+                score += 15
+            if priv["age_days"] > self.stale_days:
+                score += 5
+            r = self.results["blast_radius"].get(priv["name"], {})
+            score += r.get("percentage", 0) * 0.2
+
+        return min(100, round(score))
+
+    def _build_attack_narrative(self):
+        """Return a plain-language description of the highest-risk attack path."""
+        if not self.results["private_keys"]:
+            return None
+
+        def risk_weight(k):
+            s = 0
+            if not k.get("encrypted"):      s += 40
+            if k.get("permissions") not in ("600", "400"): s += 20
+            if k.get("key_type") == "DSA":  s += 15
+            if k["age_days"] > self.stale_days: s += 5
+            r = self.results["blast_radius"].get(k["name"], {})
+            s += r.get("percentage", 0) * 0.3
+            return s
+
+        worst = max(self.results["private_keys"], key=risk_weight)
+        r = self.results["blast_radius"].get(worst["name"], {})
+
+        enc = ("no passphrase — usable immediately if stolen"
+               if not worst.get("encrypted")
+               else "passphrase-protected")
+        perm = worst.get("permissions", "???")
+        perm_note = "(INSECURE)" if perm not in ("600", "400") else "(OK)"
+        conf = ("confirmed via SSH config"
+                if r.get("confidence") == "confirmed"
+                else "potential — no SSH config mapping found")
+
+        lines = [
+            f"Key:          {worst['name']} ({worst.get('key_type', 'Unknown')})",
+            f"Passphrase:   {enc}",
+            f"Permissions:  {perm} {perm_note}",
+            f"Age:          {worst['age_days']} days",
+            f"Blast Radius: {r.get('count', 0)} hosts ({r.get('percentage', 0)}%) — {conf}",
+        ]
+        if r.get("targets"):
+            visible = [h for h in r["targets"] if h != "HASHED_ADDR"]
+            if visible:
+                lines.append(f"Example targets: {', '.join(visible[:5])}")
+
+        return "\n  ".join(lines)
+
+    # ── Main harvest ──────────────────────────────────────────────────────────
+
     def harvest(self):
         self.results["active_agents"] = self._detect_agents()
-        p = Path(self.ssh_dir)
-        if not p.exists():
+
+        if not self.ssh_dir.exists():
             return self.results
 
-        for item in p.iterdir():
+        self.results["dir_permissions"] = self._get_permissions(self.ssh_dir)
+        pub_by_stem = {}
+
+        for item in self.ssh_dir.iterdir():
             if not item.is_file():
                 continue
             age = self._get_file_age_days(item)
             try:
-                header = item.read_text(errors="ignore")[:100]
+                header = item.read_text(errors="ignore")[:200]
             except Exception:
                 continue
 
-            if "PRIVATE KEY" in header:
+            if any(m in header for m in self._KEY_MARKERS):
                 self.results["private_keys"].append({
-                    "path": str(item), "name": item.name, "age_days": age
+                    "path": str(item),
+                    "name": item.name,
+                    "age_days": age,
+                    "permissions": self._get_permissions(item),
+                    "encrypted": self._is_key_encrypted(item),
+                    "key_type": self._detect_key_type(header),
                 })
             elif item.suffix == ".pub":
                 content = item.read_text(errors="ignore").strip()
                 parts = content.split()
+                fp = _compute_fingerprint(content)
+                key_type_from_pub = parts[0] if parts else "Unknown"
+                pub_by_stem[item.stem] = key_type_from_pub
                 self.results["public_keys"].append({
-                    "path": str(item), "name": item.name,
-                    "fingerprint": _compute_fingerprint(content),
+                    "path": str(item),
+                    "name": item.name,
+                    "fingerprint": fp,
+                    "key_type": key_type_from_pub,
                     "comment": parts[-1] if len(parts) > 2 else "None",
-                    "age_days": age, "source": "public_keys"
+                    "age_days": age,
+                    "source": "public_keys",
                 })
             elif item.name == "authorized_keys":
                 self.results["authorized_keys"] = self._parse_authorized_keys(item)
             elif item.name == "known_hosts":
                 self.results["known_hosts"] = self._parse_known_hosts(item)
             elif item.name == "config":
-                self.results["config_entries"] = self._parse_ssh_config(item)
+                entries, fwd = self._parse_ssh_config(item)
+                self.results["config_entries"] = entries
+                self.results["forward_agent_hosts"] = fwd
+
+        # Enrich private key type using corresponding .pub when OpenSSH format
+        for priv in self.results["private_keys"]:
+            stem = Path(priv["name"]).stem
+            if priv["key_type"] == "OpenSSH" and stem in pub_by_stem:
+                priv["key_type"] = pub_by_stem[stem]
 
         self.results["blast_radius"] = self._calculate_blast_radius()
         self._generate_alerts()
+        self.results["risk_score"] = self._compute_risk_score()
         return self.results
-
-    def _generate_alerts(self):
-        alerts = self.results["risk_alerts"]
-        if self.results["active_agents"]:
-            alerts.append({
-                "level": "MEDIUM",
-                "message": "Active SSH agent sockets found. Potential session hijacking risk.",
-                "key": None
-            })
-        for key_name, r in self.results["blast_radius"].items():
-            if r["percentage"] > 80:
-                alerts.append({
-                    "level": "HIGH",
-                    "message": f"Key '{key_name}' has a Blast Radius of {r['percentage']}%.",
-                    "key": key_name
-                })
-        for priv in self.results["private_keys"]:
-            if priv["age_days"] > self.stale_days:
-                alerts.append({
-                    "level": "LOW",
-                    "message": f"Private key '{priv['name']}' is stale ({priv['age_days']} days old).",
-                    "key": priv["name"]
-                })
 
     def add_github_matches(self, username):
         matcher = IdentityMatcher()
         local_keys = self.results["public_keys"] + self.results["authorized_keys"]
-        matches = matcher.match_against_local(username, local_keys)
-        self.results["github_matches"] = matches
-        return matches
+        self.results["github_matches"] = matcher.match_against_local(username, local_keys)
+        return self.results["github_matches"]
 
     def save_json(self, output_path="data/findings.json"):
         os.makedirs(os.path.dirname(output_path), exist_ok=True)
@@ -252,33 +438,70 @@ class SSHHarvester:
         return True
 
 
+def _risk_bar(score):
+    filled = round(score / 5)
+    bar = "█" * filled + "░" * (20 - filled)
+    label = "LOW" if score < 30 else "MEDIUM" if score < 60 else "HIGH"
+    return f"{bar}  {score}/100  [{label}]"
+
+
 def _print_results(findings, github_user=None):
     total = sum(len(findings[k]) for k in
                 ("private_keys", "public_keys", "authorized_keys", "known_hosts", "active_agents"))
+
     print("\n══════════════════════════════════════════════════════════════")
     print("  FOX-TRACE  —  SSH Trust & Lateral Movement Mapper")
     print("══════════════════════════════════════════════════════════════")
+    score = findings.get("risk_score", 0)
+    print(f"  Risk Score  {_risk_bar(score)}")
     print(f"  Findings    {total} artifacts identified\n")
+
     print(f"Found {len(findings['private_keys'])} private key(s).")
     print(f"Found {len(findings['public_keys'])} public key(s).")
     print(f"Found {len(findings['authorized_keys'])} authorized_keys entry(s).")
     print(f"Found {len(findings['known_hosts'])} known host(s).")
     print(f"Found {len(findings['active_agents'])} active SSH agent(s).")
+    if findings["dir_permissions"]:
+        ok = findings["dir_permissions"] == "700"
+        print(f"~/.ssh permissions: {findings['dir_permissions']} ({'OK' if ok else 'WARN — should be 700'})")
+
+    if findings["private_keys"]:
+        print("\n--- Private Keys ---")
+        for k in findings["private_keys"]:
+            enc = "encrypted" if k.get("encrypted") else "NO PASSPHRASE"
+            print(f"  {k['name']:20} {k.get('key_type', '?'):12} perm:{k.get('permissions', '?')}  {enc}  age:{k['age_days']}d")
 
     if findings["blast_radius"]:
         print("\n--- Blast Radius Analysis ---")
         for key, r in findings["blast_radius"].items():
-            print(f"Key: {key} -> Accesses {r['count']} hosts ({r['percentage']}%)")
+            conf = "" if r["confidence"] == "confirmed" else " [potential]"
+            print(f"  {key} → {r['count']} hosts ({r['percentage']}%){conf}")
 
     if findings["risk_alerts"]:
         print("\n--- Risk Alerts ---")
         for alert in findings["risk_alerts"]:
-            print(f"[{alert['level']}] {alert['message']}")
+            print(f"  [{alert['level']:6}] {alert['message']}")
+
+    if findings.get("forward_agent_hosts"):
+        print("\n--- ForwardAgent ---")
+        for h in findings["forward_agent_hosts"]:
+            print(f"  ForwardAgent enabled for: {h}")
 
     if findings.get("github_matches"):
         print(f"\n--- Identity Matching (GitHub: {github_user}) ---")
         for m in findings["github_matches"]:
-            print(f"[MATCH] Key found in {m['source']}! (Comment: {m['comment']})")
+            print(f"  [MATCH] Key in {m['source']} — comment: {m['comment']}")
+
+    # Attack narrative — the unique part
+    harvester = SSHHarvester.__new__(SSHHarvester)
+    harvester.results = findings
+    harvester.stale_days = 180
+    narrative = harvester._build_attack_narrative()
+    if narrative:
+        print("\n──────────────────────────────────────────────────────────────")
+        print("  MOST CRITICAL ATTACK PATH")
+        print("──────────────────────────────────────────────────────────────")
+        print(f"  {narrative}")
 
     print("══════════════════════════════════════════════════════════════")
 
@@ -295,9 +518,11 @@ if __name__ == "__main__":
                         help="Match local keys against a GitHub user's public keys")
     parser.add_argument("--stale", metavar="DAYS", type=int, default=180,
                         help="Flag private keys older than DAYS days (default: 180)")
+    parser.add_argument("--ssh-dir", metavar="DIR",
+                        help="Path to SSH directory (default: ~/.ssh)")
     args = parser.parse_args()
 
-    harvester = SSHHarvester(stale_days=args.stale)
+    harvester = SSHHarvester(ssh_dir=args.ssh_dir, stale_days=args.stale)
     findings = harvester.harvest()
 
     if args.github:
@@ -305,7 +530,7 @@ if __name__ == "__main__":
 
     _print_results(findings, github_user=args.github)
     harvester.save_json(args.json)
-    print(f"[SUCCESS] Results saved to {args.json}")
+    print(f"\n[SUCCESS] Results saved to {args.json}")
 
     if args.html is not None:
         from visualizer import FoxVisualizer
