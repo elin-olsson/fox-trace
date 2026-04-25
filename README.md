@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="banner.png" alt="Fox-trace Banner">
+</p>
+
 # Fox-trace 🦊🕸️
 **The SSH Trust & Lateral Movement Mapper**
 
@@ -54,5 +58,9 @@ Results are displayed in the terminal and saved to `data/findings.json` for furt
 - [ ] Stale Key Analytics
 
 ---
+
+<p align="center">
+  <img src="logo.png" alt="Fox-trace Logo" width="200">
+</p>
 
 &copy; 2026 shadowfox.se
