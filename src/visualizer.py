@@ -115,6 +115,10 @@ class FoxVisualizer:
         os.makedirs(os.path.dirname(self.output_path), exist_ok=True)
 
         generated = datetime.now().strftime("%Y-%m-%d %H:%M")
+        n_hosts  = sum(1 for n in graph["nodes"] if n["type"] == "host")
+        n_keys   = sum(1 for n in graph["nodes"] if n["type"] == "key")
+        n_alerts = len(raw.get("risk_alerts", []))
+        alert_color = "#ff4d4d" if n_alerts else "#40ffaa"
         html = f"""<!DOCTYPE html>
 <html>
 <head>
@@ -293,6 +297,29 @@ class FoxVisualizer:
             letter-spacing: 0.5px;
         }}
         .dot {{ width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }}
+        #stats {{
+            margin-top: 8px;
+            font-family: 'Courier New', monospace;
+            font-size: 0.68em;
+            color: #5a6b7a;
+            letter-spacing: 1px;
+        }}
+        #stats .stat-alert {{ color: {alert_color}; }}
+        #tooltip {{
+            position: absolute;
+            background: #0d141b;
+            border: 1px solid #1a2a3a;
+            border-radius: 4px;
+            padding: 7px 12px;
+            font-family: 'Courier New', monospace;
+            font-size: 0.68em;
+            color: #e0e0e0;
+            pointer-events: none;
+            display: none;
+            z-index: 20;
+            white-space: nowrap;
+            line-height: 1.6;
+        }}
         #brand {{
             position: absolute;
             bottom: 24px;
@@ -313,7 +340,9 @@ class FoxVisualizer:
         <h1>FOX-TRACE // SHADOW MAP</h1>
         <p>SSH Trust &amp; Lateral Movement Analysis</p>
         <div id="risk-badge">RISK SCORE: {risk_score}/100 — {risk_label}</div>
+        <div id="stats">{n_keys} key(s) &nbsp;·&nbsp; {n_hosts} hosts &nbsp;·&nbsp; <span class="stat-alert">{n_alerts} alert(s)</span></div>
     </div>
+    <div id="tooltip"></div>
     <div class="legend">
         <div class="legend-title">Legend</div>
         <div class="legend-item"><span class="legend-tag"><span class="dot" style="background:#00d4ff;box-shadow:0 0 6px #00d4ff66"></span>Local Machine</span></div>
@@ -373,6 +402,25 @@ class FoxVisualizer:
                 .on("start", (e,d) => {{ if(!e.active) sim.alphaTarget(0.3).restart(); d.fx=d.x; d.fy=d.y; }})
                 .on("drag",  (e,d) => {{ d.fx=e.x; d.fy=e.y; }})
                 .on("end",   (e,d) => {{ if(!e.active) sim.alphaTarget(0); d.fx=null; d.fy=null; }}))
+            .on("mouseover", (event, d) => {{
+                const tip = d3.select("#tooltip");
+                let t = "<strong>" + esc(d.label) + "</strong>";
+                if (d.type === "key")
+                    t += "<br>" + (d.encrypted ? "✓ encrypted" : "✗ no passphrase") + " &nbsp;·&nbsp; blast " + esc(d.blast_radius) + "%";
+                if (d.type === "host")
+                    t += "<br>" + esc(d.category || "host");
+                if (d.type === "origin")
+                    t += "<br>risk score: " + esc(d.risk_score) + "/100";
+                if (d.alerts && d.alerts.length > 0)
+                    t += "<br><span style='color:#ff4d4d'>" + esc(d.alerts.length) + " alert(s)</span>";
+                tip.style("display", "block").html(t);
+            }})
+            .on("mousemove", (event) => {{
+                d3.select("#tooltip")
+                    .style("left", (event.pageX + 14) + "px")
+                    .style("top",  (event.pageY - 36) + "px");
+            }})
+            .on("mouseout", () => {{ d3.select("#tooltip").style("display", "none"); }})
             .on("click", (event,d) => {{
                 const panel = d3.select("#details");
                 let h = "<span class='close-btn' onclick='document.getElementById(&quot;details&quot;).style.display=&quot;none&quot;'>✕ close</span>";

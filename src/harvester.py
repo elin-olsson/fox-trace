@@ -2,6 +2,7 @@ import os
 import re
 import hashlib
 import base64
+import struct
 import urllib.request
 import json
 import time
@@ -11,6 +12,32 @@ from pathlib import Path
 _REPO_ROOT = Path(__file__).parent.parent
 _DEFAULT_JSON = str(_REPO_ROOT / "data" / "findings.json")
 _DEFAULT_HTML = str(_REPO_ROOT / "data" / "shadow_map.html")
+
+
+def _get_rsa_key_bits(pub_content):
+    """Return RSA modulus size in bits from a public key string, or None."""
+    try:
+        parts = pub_content.strip().split()
+        if len(parts) < 2 or parts[0] != "ssh-rsa":
+            return None
+        raw = base64.b64decode(parts[1])
+        offset = 0
+        def read_field():
+            nonlocal offset
+            (length,) = struct.unpack(">I", raw[offset:offset + 4])
+            offset += 4
+            value = raw[offset:offset + length]
+            offset += length
+            return value
+        read_field()   # key type ("ssh-rsa")
+        read_field()   # public exponent (e)
+        modulus = read_field()
+        # strip leading zero sign byte if present
+        if modulus and modulus[0] == 0:
+            modulus = modulus[1:]
+        return len(modulus) * 8
+    except Exception:
+        return None
 
 
 def _compute_fingerprint(key_string):
@@ -292,6 +319,21 @@ class SSHHarvester:
                     "remediation": "Generate a new key: ssh-keygen -t ed25519 -f ~/.ssh/id_ed25519. Update authorized_keys on all servers, then delete the DSA key.",
                 })
 
+            bits = priv.get("key_bits")
+            if priv.get("key_type") == "RSA" and bits is not None:
+                if bits < 2048:
+                    alerts.append({
+                        "level": "HIGH", "key": name,
+                        "message": f"Key '{name}' is RSA {bits}-bit — below minimum of 2048, cryptographically weak.",
+                        "remediation": "Generate a new key: ssh-keygen -t ed25519 -f ~/.ssh/id_ed25519. Update authorized_keys on all servers, then delete the weak key.",
+                    })
+                elif bits < 3072:
+                    alerts.append({
+                        "level": "MEDIUM", "key": name,
+                        "message": f"Key '{name}' is RSA {bits}-bit — below NIST recommendation of 3072 bits.",
+                        "remediation": f"Consider rotating to a stronger key: ssh-keygen -t ed25519 or ssh-keygen -t rsa -b 4096 -f ~/.ssh/{name}",
+                    })
+
             if priv["age_days"] > self.stale_days:
                 alerts.append({
                     "level": "LOW", "key": name,
@@ -407,12 +449,14 @@ class SSHHarvester:
                 parts = content.split()
                 fp = _compute_fingerprint(content)
                 key_type_from_pub = parts[0] if parts else "Unknown"
-                pub_by_stem[item.stem] = key_type_from_pub
+                key_bits = _get_rsa_key_bits(content)
+                pub_by_stem[item.stem] = {"key_type": key_type_from_pub, "bits": key_bits}
                 self.results["public_keys"].append({
                     "path": str(item),
                     "name": item.name,
                     "fingerprint": fp,
                     "key_type": key_type_from_pub,
+                    "key_bits": key_bits,
                     "comment": parts[-1] if len(parts) > 2 else "None",
                     "age_days": age,
                     "source": "public_keys",
@@ -426,11 +470,14 @@ class SSHHarvester:
                 self.results["config_entries"] = entries
                 self.results["forward_agent_hosts"] = fwd
 
-        # Enrich private key type using corresponding .pub when OpenSSH format
+        # Enrich private key type and bits using corresponding .pub
         for priv in self.results["private_keys"]:
             stem = Path(priv["name"]).stem
-            if priv["key_type"] == "OpenSSH" and stem in pub_by_stem:
-                priv["key_type"] = pub_by_stem[stem]
+            if stem in pub_by_stem:
+                pub_info = pub_by_stem[stem]
+                if priv["key_type"] == "OpenSSH":
+                    priv["key_type"] = pub_info["key_type"]
+                priv["key_bits"] = pub_info["bits"]
 
         self.results["blast_radius"] = self._calculate_blast_radius()
         self._generate_alerts()
