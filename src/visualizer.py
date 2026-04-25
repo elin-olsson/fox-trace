@@ -149,7 +149,7 @@ class FoxVisualizer:
             pointer-events: none;
             text-shadow: 0 1px 3px #000;
         }}
-        .link {{ stroke: #1a2a3a; stroke-opacity: 0.6; stroke-width: 1px; }}
+        .link {{ stroke: #00d4ff; stroke-opacity: 0.18; stroke-width: 1px; }}
         #header {{ position: absolute; top: 24px; left: 24px; z-index: 10; }}
         #header h1 {{
             font-family: 'Courier New', monospace;
@@ -364,8 +364,8 @@ class FoxVisualizer:
         const link = g.append("g").selectAll("line")
             .data(data.links).enter().append("line")
             .attr("class","link")
-            .style("stroke-width", d => d.weight > 2 ? 2 : d.weight > 1 ? 1.5 : 1)
-            .style("stroke-opacity", d => d.weight > 1 ? 0.7 : 0.4);
+            .style("stroke-width", d => d.weight > 2 ? 2.5 : d.weight > 1 ? 1.8 : 1.2)
+            .style("stroke-opacity", d => d.weight > 2 ? 0.55 : d.weight > 1 ? 0.38 : 0.18);
 
         const node = g.append("g").selectAll("g")
             .data(data.nodes).enter().append("g").attr("class","node")
