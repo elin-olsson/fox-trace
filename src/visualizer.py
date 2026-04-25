@@ -193,11 +193,18 @@ class FoxVisualizer:
             border: 1px solid #1a2a3a;
             border-radius: 8px;
             width: 350px;
+            max-height: 70vh;
+            overflow-y: auto;
             display: none;
             z-index: 10;
             box-shadow: 0 4px 30px rgba(0,0,0,0.8);
-            transition: border-color 0.3s ease;
+            transition: border-color 0.3s ease, opacity 0.15s ease;
+            scrollbar-width: thin;
+            scrollbar-color: #1a2a3a #0d141b;
         }}
+        #details::-webkit-scrollbar {{ width: 4px; }}
+        #details::-webkit-scrollbar-track {{ background: #0d141b; }}
+        #details::-webkit-scrollbar-thumb {{ background: #1a2a3a; border-radius: 2px; }}
         #details:hover {{ border-color: #00d4ff22; }}
         #details h3 {{
             margin: 0 0 14px 0;
@@ -493,6 +500,10 @@ class FoxVisualizer:
             link.attr("x1",d=>d.source.x).attr("y1",d=>d.source.y)
                 .attr("x2",d=>d.target.x).attr("y2",d=>d.target.y);
             node.attr("transform", d => `translate(${{d.x}},${{d.y}})`);
+        }});
+
+        document.addEventListener("keydown", e => {{
+            if (e.key === "Escape") document.getElementById("details").style.display = "none";
         }});
     </script>
 </body>

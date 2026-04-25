@@ -5,7 +5,7 @@
   <a href="https://github.com/elin-olsson/fox-trace/actions/workflows/ci.yml"><img src="https://github.com/elin-olsson/fox-trace/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
 </p>
 
-Fox-trace is a lightweight security tool designed to map and visualize SSH trust relationships on Linux systems. 
+Fox-trace is a lightweight security tool designed to map and visualize SSH trust relationships on Linux systems.
 
 Fox-trace identifies "Shadow Paths" — the potential routes an attacker could take to move laterally through a network by exploiting local SSH artifacts like keys, config files, and connection history.
 
@@ -48,14 +48,20 @@ python3 src/harvester.py [options]
 # Run the harvester to scan the default ~/.ssh directory
 python3 src/harvester.py
 
-# Generate the interactive Shadow Map (HTML)
-python3 src/visualizer.py
-
 # Save results to a custom JSON path
 python3 src/harvester.py --json data/custom_findings.json
+
+# Generate the interactive Shadow Map (HTML)
+python3 src/harvester.py --html
+
+# Match keys against a GitHub user's public keys
+python3 src/harvester.py --github elin-olsson
+
+# Flag keys older than 90 days as stale
+python3 src/harvester.py --stale 90
 ```
 
-### Flags (Planned/Implemented)
+### Flags
 
 | Flag | Description | Status |
 |---|---|---|
@@ -70,54 +76,74 @@ Fox-trace performs a multi-stage audit of your SSH environment to uncover hidden
 
 | Check | How | Insight |
 |---|---|---|
-| **Private Keys** | Scans `~/.ssh/` for private key headers | Identifies the "passports" available on the system. |
-| **Known Hosts** | Parses `known_hosts` (plain-text and hashed) | Maps the destinations where this user has gone before. |
-| **Authorized Keys** | Reads fingerprints and comments | Identifies who has inbound access to this system. |
-| **Identity Match** | GitHub API correlation | Verifies if an anonymous key belongs to a known GitHub identity. |
-| **Active Agents** | Scans `/tmp/` for active SSH agent sockets | Warns of potential session hijacking risks. |
-| **Blast Radius** | Correlates SSH config with known hosts | Calculates how many servers a leaked key can access. |
+| **Private Keys** | Scans `~/.ssh/` for private key headers | Identifies the "passports" available on the system |
+| **Key Strength** | Parses RSA modulus size, flags DSA | Detects cryptographically weak keys |
+| **Passphrase** | Detects encryption in PEM and OpenSSH formats | Flags keys usable immediately if stolen |
+| **Permissions** | Checks file and directory permissions | Warns on world-readable or group-readable keys |
+| **Known Hosts** | Parses `known_hosts` (plain-text and hashed) | Maps destinations where this user has gone before |
+| **Authorized Keys** | Reads fingerprints and comments | Identifies who has inbound access to this system |
+| **Identity Match** | GitHub API correlation | Verifies if an anonymous key belongs to a known GitHub identity |
+| **Active Agents** | Scans `/tmp/` for active SSH agent sockets | Warns of potential session hijacking risks |
+| **Blast Radius** | Correlates SSH config with known hosts | Calculates how many servers a leaked key can access |
+| **ForwardAgent** | Parses SSH config | Flags hosts where agent forwarding is enabled |
 
 ## Example output
-
-Running the harvester on a local system:
 
 ```
 ══════════════════════════════════════════════════════════════
   FOX-TRACE  —  SSH Trust & Lateral Movement Mapper
 ══════════════════════════════════════════════════════════════
-  Generated   2026-04-25 12:45:00
+  Risk Score  ████████████████░░░░  60/100  [HIGH]
   Findings    34 artifacts identified
 
---- Fox-trace Harvester Results ---
-Found 1 private keys.
-Found 1 public keys.
-Found 1 entries in authorized_keys.
-Found 30 known hosts (connections).
-Found 0 active SSH agents.
+Found 1 private key(s).
+Found 1 public key(s).
+Found 1 authorized_keys entry(s).
+Found 30 known host(s).
+Found 0 active SSH agent(s).
+~/.ssh permissions: 700 (OK)
+
+--- Private Keys ---
+  id_ed25519           ssh-ed25519  perm:600  NO PASSPHRASE  age:0d
 
 --- Blast Radius Analysis ---
-Key: id_ed25519 -> Accesses 30 hosts (100.0%)
+  id_ed25519 → 30 hosts (100.0%) [potential]
 
---- Risk Alerts ---
-[HIGH] Key 'id_ed25519' has a Blast Radius of 100.0%.
-[LOW] Private key 'id_ed25519' is stale (240 days old).
+--- Risk Alerts & Remediations ---
+  [HIGH  ] Key 'id_ed25519' has no passphrase — usable immediately if stolen.
+           → Fix: Add a passphrase: ssh-keygen -p -f ~/.ssh/id_ed25519
+  [HIGH  ] Key 'id_ed25519' blast radius 100.0% — 30 hosts (potential — no SSH config mapping).
+           → Fix: Use per-host keys in ~/.ssh/config (IdentityFile). Audit and
+             remove this key from authorized_keys on servers where it is no longer needed.
 
---- Identity Matching (GitHub: elin-olsson) ---
-[MATCH] Found your GitHub key in authorized_keys! (Comment: elin-olsson@hotmail.com)
-
-[SUCCESS] Results saved to data/findings.json
-[SUCCESS] Shadow Map generated: data/shadow_map.html
+──────────────────────────────────────────────────────────────
+  MOST CRITICAL ATTACK PATH
+──────────────────────────────────────────────────────────────
+  Key:          id_ed25519 (ssh-ed25519)
+  Passphrase:   no passphrase — usable immediately if stolen
+  Permissions:  600 (OK)
+  Age:          0 days
+  Blast Radius: 30 hosts (100.0%) — potential — no SSH config mapping found
+  Example targets: github.com, 10.10.20.10, 192.168.1.100
 ══════════════════════════════════════════════════════════════
 ```
 
 ## Shadow Map Visualization
 
-Fox-trace includes a built-in visualizer that generates an interactive, force-directed graph using **D3.js**. 
+Fox-trace includes a built-in visualizer that generates an interactive, force-directed graph using **D3.js**.
 
-- **Local Machine (Origin):** The starting point of the audit.
-- **SSH Keys:** Represented by nodes that scale based on their **Blast Radius**.
-- **Known Hosts:** Destinations identified in the trust network.
-- **Risks/Alerts:** Critical findings highlighted with red glow and alert badges.
+```bash
+python3 src/harvester.py --html
+```
+
+![Shadow Map preview](shadow_map_preview.png)
+
+- **Local Machine** — the starting point of the audit, colored by risk score
+- **SSH Keys** — nodes scaled by blast radius; green = passphrase protected, red = no passphrase
+- **Known Hosts** — categorized by type: private IP, external IP, known service (GitHub), or loopback
+- **Alerts** — click any node to see findings and exact remediation commands
+- **Hover** — hover over any node for a quick summary without clicking
+- **Zoom & drag** — scroll to zoom, drag nodes to rearrange, ESC to close the info panel
 
 ## Dependencies
 
@@ -127,8 +153,9 @@ No runtime dependencies — stdlib only.
 |---|---|---|
 | `json` | stdlib | Data export and visualization input |
 | `urllib` | stdlib | GitHub Public Key API communication |
-| `hashlib` | stdlib | SSH key fingerprinting (MD5) |
-| `d3.js` | v7 (CDN) | Interactive graph rendering (via visualizer.py) |
+| `hashlib` | stdlib | SSH key fingerprinting (SHA256) |
+| `base64` / `struct` | stdlib | RSA key size parsing |
+| `d3.js` | v7 (CDN) | Interactive graph rendering (via visualizer) |
 
 ---
 

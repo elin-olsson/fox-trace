@@ -367,6 +367,12 @@ class SSHHarvester:
                 score += 20
             if priv.get("key_type") == "DSA":
                 score += 15
+            bits = priv.get("key_bits")
+            if priv.get("key_type") == "RSA" and bits is not None:
+                if bits < 2048:
+                    score += 20
+                elif bits < 3072:
+                    score += 10
             if priv["age_days"] > self.stale_days:
                 score += 5
             r = self.results["blast_radius"].get(priv["name"], {})
