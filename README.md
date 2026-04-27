@@ -1,4 +1,6 @@
-![Fox-trace banner](banner.png)
+<p align="center">
+  <img src="logo.png" alt="fox-trace" width="250">
+</p>
 
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-blue.svg" alt="License: MIT"></a>
@@ -160,9 +162,5 @@ No runtime dependencies — stdlib only.
 ---
 
 <p align="center">
-  <img src="logo.png" alt="Fox-trace logo" width="200">
-</p>
-
-<p align="center">
-  <sub>The banner and logo are &copy; 2026 shadowfox.se — all rights reserved, not covered by the MIT license.</sub>
+  <sub>The logo is &copy; 2026 shadowfox.se — all rights reserved, not covered by the MIT license.</sub>
 </p>
