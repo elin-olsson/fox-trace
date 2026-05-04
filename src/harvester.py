@@ -9,7 +9,7 @@ import time
 import argparse
 from pathlib import Path
 
-__version__ = "1.2.0"
+__version__ = "1.2.1"
 
 _REPO_ROOT = Path(__file__).parent.parent
 _DEFAULT_JSON = str(_REPO_ROOT / "data" / "findings.json")
