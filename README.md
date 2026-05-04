@@ -63,12 +63,16 @@ python3 src/harvester.py --github elin-olsson
 python3 src/harvester.py --stale 90
 ```
 
+
+> **Note:** The `data/` directory is created automatically on first run. Output files (`findings.json` and `shadow_map.html`) are written there by default.
+
 ### Flags
 
 | Flag | Description | Status |
 |---|---|---|
 | `--json FILE` | Write structured findings to JSON | ✅ Implemented |
-| `--html FILE` | Generate interactive D3.js Shadow Map | ✅ Implemented |
+| `--html [FILE]` | Generate interactive D3.js Shadow Map (optional path; defaults to `data/shadow_map.html`) | ✅ Implemented |
+| `--ssh-dir DIR` | Path to SSH directory to scan (default: `~/.ssh`) | ✅ Implemented |
 | `--github USER` | Match keys against GitHub public API | ✅ Implemented |
 | `--stale DAYS` | Flag keys older than X days (default: 180) | ✅ Implemented |
 
