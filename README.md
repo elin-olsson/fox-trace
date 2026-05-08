@@ -61,6 +61,9 @@ python3 src/harvester.py --github elin-olsson
 
 # Flag keys older than 90 days as stale
 python3 src/harvester.py --stale 90
+
+# Scan multiple hosts and detect circular trust relationships
+python3 src/harvester.py --targets targets.txt --html
 ```
 
 
@@ -68,13 +71,15 @@ python3 src/harvester.py --stale 90
 
 ### Flags
 
-| Flag | Description | Status |
-|---|---|---|
-| `--json FILE` | Write structured findings to JSON | ✅ Implemented |
-| `--html [FILE]` | Generate interactive D3.js Shadow Map (optional path; defaults to `data/shadow_map.html`) | ✅ Implemented |
-| `--ssh-dir DIR` | Path to SSH directory to scan (default: `~/.ssh`) | ✅ Implemented |
-| `--github USER` | Match keys against GitHub public API | ✅ Implemented |
-| `--stale DAYS` | Flag keys older than X days (default: 180) | ✅ Implemented |
+| Flag | Description |
+|---|---|
+| `--version` | Print the version number and exit |
+| `--json FILE` | Write structured findings to JSON |
+| `--html [FILE]` | Generate interactive D3.js Shadow Map (optional path; defaults to `data/shadow_map.html`) |
+| `--ssh-dir DIR` | Path to SSH directory to scan (default: `~/.ssh`) |
+| `--github USER` | Match keys against GitHub public API |
+| `--stale DAYS` | Flag keys older than X days (default: 180) |
+| `--targets FILE` | Scan multiple hosts listed in FILE (one per line) and detect circular trust relationships |
 
 ## What it checks
 
