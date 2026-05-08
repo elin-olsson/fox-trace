@@ -629,6 +629,167 @@ class FoxVisualizer:
             pass
         return True
 
+    def generate_multi(self) -> bool:
+        """Generate a multi-host trust map from a multi_findings.json file."""
+        if not os.path.exists(self.data_path):
+            print(f"Error: {self.data_path} not found.")
+            return False
+
+        with open(self.data_path) as f:
+            raw = json.load(f)
+
+        hosts = raw.get("hosts", {})
+        trust_graph = raw.get("trust_graph", {})
+        circular_chains = raw.get("circular_chains", [])
+        circular_alerts = raw.get("circular_alerts", [])
+
+        if not hosts:
+            print("[!] No host data in multi findings.")
+            return False
+
+        # Build circular edge set for styling
+        circular_pairs: set = set()
+        for chain in circular_chains:
+            for i in range(len(chain) - 1):
+                circular_pairs.add((chain[i], chain[i + 1]))
+
+        nodes = []
+        for label, findings in hosts.items():
+            score = findings.get("risk_score", 0)
+            risk_label = "LOW" if score < 30 else "MEDIUM" if score < 60 else "HIGH"
+            nodes.append({
+                "id": label,
+                "label": label,
+                "risk_score": score,
+                "risk_label": risk_label,
+                "n_keys": len(findings.get("private_keys", [])),
+                "n_hosts": len(findings.get("known_hosts", [])),
+                "alerts": findings.get("risk_alerts", []),
+            })
+
+        links = []
+        for src, dsts in trust_graph.items():
+            for dst in dsts:
+                links.append({
+                    "source": src,
+                    "target": dst,
+                    "circular": [src, dst] in [[c[i], c[i + 1]] for c in circular_chains for i in range(len(c) - 1)],
+                })
+
+        generated = datetime.now().strftime("%Y-%m-%d %H:%M")
+        n_circular = len(circular_chains)
+        circular_badge = f'<div class="badge badge-crit">{n_circular} circular chain{"s" if n_circular != 1 else ""}</div>' if n_circular else '<div class="badge badge-ok">No circular trust</div>'
+        circular_list = "".join(
+            f'<div class="chain-item">⚠ {" → ".join(c)}</div>'
+            for c in circular_chains
+        ) or '<div class="chain-none">No circular trust chains detected.</div>'
+
+        graph_json = json.dumps({"nodes": nodes, "links": links})
+
+        html = f"""<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>Fox-trace | Multi-Host Trust Map</title>
+    <script src="https://d3js.org/d3.v7.min.js"></script>
+    <style>
+        * {{ box-sizing: border-box; }}
+        body {{ background: #050a0f; color: #e0e0e0; font-family: 'Segoe UI', Tahoma, sans-serif; padding: 30px; }}
+        h1 {{ color: #00d4ff; font-family: 'Courier New', monospace; letter-spacing: 2px; margin-bottom: 4px; }}
+        h2 {{ color: #5a8fa8; font-size: 13px; font-family: 'Courier New', monospace; letter-spacing: 1px;
+              text-transform: uppercase; margin: 24px 0 10px; border-bottom: 1px solid #1a2a3a; padding-bottom: 6px; }}
+        .subtitle {{ color: #5a6b7a; font-size: 13px; margin-bottom: 20px; }}
+        .summary {{ display: flex; gap: 16px; align-items: center; margin-bottom: 24px; flex-wrap: wrap; }}
+        .badge {{ padding: 4px 12px; border-radius: 3px; font-size: 12px; font-family: monospace; }}
+        .badge-crit {{ background: #2a0a0a; border: 1px solid #ff0055; color: #ff0055; }}
+        .badge-ok   {{ background: #0a1a0a; border: 1px solid #40ffaa; color: #40ffaa; }}
+        #graph-wrap {{ background: #07101a; border: 1px solid #1a2a3a; border-radius: 6px; overflow: hidden; margin-bottom: 24px; }}
+        .host-node circle {{ stroke: #1a2a3a; stroke-width: 1.5; cursor: pointer; }}
+        .host-node text {{ fill: #e0e0e0; font-size: 12px; font-family: monospace; pointer-events: none; }}
+        .link {{ stroke-width: 2; fill: none; marker-end: url(#arrow); opacity: 0.75; }}
+        .link.normal   {{ stroke: #2a4a6a; }}
+        .link.circular {{ stroke: #ff0055; stroke-width: 2.5;
+                          animation: pulse-link 1.6s ease-in-out infinite; }}
+        @keyframes pulse-link {{ 0%,100% {{ opacity: 0.75; }} 50% {{ opacity: 1; }} }}
+        .risk-LOW    {{ fill: #40ffaa; }}
+        .risk-MEDIUM {{ fill: #ffaa4d; }}
+        .risk-HIGH   {{ fill: #ff4d4d; }}
+        .chain-item {{ font-family: monospace; font-size: 13px; color: #ff0055;
+                       padding: 6px 12px; background: #0d0a14; border: 1px solid #3a1a2a;
+                       border-left: 3px solid #ff0055; margin-bottom: 8px; border-radius: 3px; }}
+        .chain-none {{ color: #3a4a5a; font-style: italic; font-size: 13px; }}
+        .footer {{ margin-top: 30px; font-size: 11px; color: #3a4a5a; text-align: center; }}
+    </style>
+</head>
+<body>
+<h1>FOX-TRACE // MULTI-HOST TRUST MAP</h1>
+<p class="subtitle">Generated: {generated} &mdash; {len(hosts)} hosts scanned</p>
+<div class="summary">
+  {circular_badge}
+  <span style="font-size:12px;color:#5a6b7a">{len(nodes)} hosts &middot; {len(links)} trust edge{"s" if len(links) != 1 else ""}</span>
+</div>
+<h2>Trust Graph</h2>
+<div id="graph-wrap"><svg id="graph"></svg></div>
+<h2>Circular Trust Chains</h2>
+{circular_list}
+<div class="footer">&copy; 2026 shadowfox.se &mdash; fox-trace</div>
+<script>
+(function() {{
+  var DATA = {graph_json};
+  var W = document.getElementById("graph-wrap").clientWidth || 900;
+  var H = Math.max(400, DATA.nodes.length * 80);
+  var svg = d3.select("#graph").attr("width", W).attr("height", H);
+  svg.append("defs").append("marker")
+     .attr("id","arrow").attr("viewBox","0 -4 10 8").attr("refX",22).attr("refY",0)
+     .attr("markerWidth",6).attr("markerHeight",6).attr("orient","auto")
+     .append("path").attr("d","M0,-4L10,0L0,4").attr("fill","#2a4a6a");
+  svg.append("defs").append("marker")
+     .attr("id","arrow-circ").attr("viewBox","0 -4 10 8").attr("refX",22).attr("refY",0)
+     .attr("markerWidth",6).attr("markerHeight",6).attr("orient","auto")
+     .append("path").attr("d","M0,-4L10,0L0,4").attr("fill","#ff0055");
+  var COLOR = {{ LOW:"#40ffaa", MEDIUM:"#ffaa4d", HIGH:"#ff4d4d" }};
+  var sim = d3.forceSimulation(DATA.nodes)
+    .force("link", d3.forceLink(DATA.links).id(d=>d.id).distance(180))
+    .force("charge", d3.forceManyBody().strength(-400))
+    .force("center", d3.forceCenter(W/2, H/2))
+    .force("collision", d3.forceCollide(50));
+  var link = svg.append("g").selectAll(".link").data(DATA.links).join("line")
+    .attr("class", d => "link " + (d.circular ? "circular" : "normal"))
+    .attr("marker-end", d => d.circular ? "url(#arrow-circ)" : "url(#arrow)");
+  var node = svg.append("g").selectAll(".host-node").data(DATA.nodes).join("g")
+    .attr("class","host-node").call(
+      d3.drag()
+        .on("start", (e,d) => {{ if (!e.active) sim.alphaTarget(0.3).restart(); d.fx=d.x; d.fy=d.y; }})
+        .on("drag",  (e,d) => {{ d.fx=e.x; d.fy=e.y; }})
+        .on("end",   (e,d) => {{ if (!e.active) sim.alphaTarget(0); d.fx=null; d.fy=null; }})
+    );
+  node.append("circle").attr("r", 22)
+    .attr("fill", d => COLOR[d.risk_label] + "22")
+    .attr("stroke", d => COLOR[d.risk_label]);
+  node.append("text").attr("text-anchor","middle").attr("dy","0.35em")
+    .attr("fill", d => COLOR[d.risk_label]).text(d => d.label);
+  node.append("title").text(d => `${{d.label}}\\nRisk: ${{d.risk_score}}/100 [${{d.risk_label}}]\\nKeys: ${{d.n_keys}}  Known hosts: ${{d.n_hosts}}`);
+  sim.on("tick", () => {{
+    link.attr("x1",d=>d.source.x).attr("y1",d=>d.source.y)
+        .attr("x2",d=>d.target.x).attr("y2",d=>d.target.y);
+    node.attr("transform",d=>`translate(${{d.x}},${{d.y}})`);
+  }});
+}})();
+</script>
+</body>
+</html>"""
+
+        os.makedirs(os.path.dirname(self.output_path), exist_ok=True)
+        with open(self.output_path, "w") as f:
+            f.write(html)
+
+        print(f"[SUCCESS] Multi-host Shadow Map generated: {self.output_path}")
+        try:
+            webbrowser.open("file://" + os.path.abspath(self.output_path))
+        except Exception:
+            pass
+        return True
+
 
 if __name__ == "__main__":
     import argparse

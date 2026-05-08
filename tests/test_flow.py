@@ -9,7 +9,7 @@ from pathlib import Path
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from harvester import SSHHarvester, IdentityMatcher, _compute_fingerprint
+from harvester import SSHHarvester, IdentityMatcher, TrustGraphAnalyzer, _compute_fingerprint, _parse_targets_file
 from visualizer import FoxVisualizer
 
 
@@ -353,6 +353,128 @@ class TestFullFlow(unittest.TestCase):
                     content = f.read()
                 self.assertIn("FOX-TRACE", content)
                 self.assertIn("RISK SCORE", content)
+
+
+def _make_findings(known_hosts=None, blast_radius=None):
+    """Return a minimal findings dict for TrustGraphAnalyzer tests."""
+    return {
+        "private_keys": [], "public_keys": [], "authorized_keys": [],
+        "known_hosts": known_hosts or [],
+        "config_entries": [], "forward_agent_hosts": [], "active_agents": [],
+        "dir_permissions": "700", "risk_score": 0, "risk_alerts": [],
+        "blast_radius": blast_radius or {}, "github_matches": [],
+        "attack_narrative": "",
+    }
+
+
+class TestTrustGraphAnalyzer(unittest.TestCase):
+    def test_no_trust_when_no_blast_radius(self):
+        findings = {
+            "A": _make_findings(known_hosts=[{"host": "serverA", "is_hashed": False, "key_type": "RSA"}]),
+            "B": _make_findings(known_hosts=[{"host": "serverB", "is_hashed": False, "key_type": "RSA"}]),
+        }
+        graph = TrustGraphAnalyzer().build_graph(findings)
+        self.assertEqual(graph["A"], set())
+        self.assertEqual(graph["B"], set())
+
+    def test_direct_trust_detected(self):
+        # A has a key that can reach B (B's label matches A's blast_radius target)
+        findings = {
+            "A": _make_findings(
+                known_hosts=[{"host": "B", "is_hashed": False, "key_type": "RSA"}],
+                blast_radius={"id_rsa": {"count": 1, "percentage": 100, "targets": ["B"], "confidence": "confirmed"}},
+            ),
+            "B": _make_findings(),
+        }
+        graph = TrustGraphAnalyzer().build_graph(findings)
+        self.assertIn("B", graph["A"])
+        self.assertNotIn("A", graph["B"])
+
+    def test_circular_trust_detected(self):
+        # A → B and B → A
+        findings = {
+            "A": _make_findings(
+                known_hosts=[{"host": "B", "is_hashed": False, "key_type": "RSA"}],
+                blast_radius={"id_rsa": {"count": 1, "percentage": 100, "targets": ["B"], "confidence": "confirmed"}},
+            ),
+            "B": _make_findings(
+                known_hosts=[{"host": "A", "is_hashed": False, "key_type": "RSA"}],
+                blast_radius={"id_ed25519": {"count": 1, "percentage": 100, "targets": ["A"], "confidence": "confirmed"}},
+            ),
+        }
+        graph = TrustGraphAnalyzer().build_graph(findings)
+        cycles = TrustGraphAnalyzer().find_cycles(graph)
+        self.assertTrue(any(set(c[:-1]) == {"A", "B"} for c in cycles))
+
+    def test_no_cycle_in_one_way_trust(self):
+        findings = {
+            "A": _make_findings(
+                known_hosts=[{"host": "B", "is_hashed": False, "key_type": "RSA"}],
+                blast_radius={"id_rsa": {"count": 1, "percentage": 100, "targets": ["B"], "confidence": "confirmed"}},
+            ),
+            "B": _make_findings(),
+        }
+        graph = TrustGraphAnalyzer().build_graph(findings)
+        cycles = TrustGraphAnalyzer().find_cycles(graph)
+        self.assertEqual(cycles, [])
+
+    def test_generate_alerts_returns_critical(self):
+        cycles = [["A", "B", "A"]]
+        alerts = TrustGraphAnalyzer().generate_alerts(cycles)
+        self.assertEqual(len(alerts), 1)
+        self.assertEqual(alerts[0]["level"], "CRITICAL")
+        self.assertIn("A → B → A", alerts[0]["message"])
+
+    def test_three_node_cycle(self):
+        findings = {
+            "A": _make_findings(
+                known_hosts=[{"host": "B", "is_hashed": False, "key_type": "RSA"}],
+                blast_radius={"k": {"count": 1, "percentage": 100, "targets": ["B"], "confidence": "confirmed"}},
+            ),
+            "B": _make_findings(
+                known_hosts=[{"host": "C", "is_hashed": False, "key_type": "RSA"}],
+                blast_radius={"k": {"count": 1, "percentage": 100, "targets": ["C"], "confidence": "confirmed"}},
+            ),
+            "C": _make_findings(
+                known_hosts=[{"host": "A", "is_hashed": False, "key_type": "RSA"}],
+                blast_radius={"k": {"count": 1, "percentage": 100, "targets": ["A"], "confidence": "confirmed"}},
+            ),
+        }
+        graph = TrustGraphAnalyzer().build_graph(findings)
+        cycles = TrustGraphAnalyzer().find_cycles(graph)
+        self.assertTrue(any(set(c[:-1]) == {"A", "B", "C"} for c in cycles))
+
+
+class TestParseTargetsFile(unittest.TestCase):
+    def test_label_colon_path(self):
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as f:
+            f.write("server1:/home/backup/server1/.ssh\n")
+            name = f.name
+        try:
+            result = _parse_targets_file(name)
+            self.assertEqual(result, [("server1", "/home/backup/server1/.ssh")])
+        finally:
+            os.unlink(name)
+
+    def test_path_only_derives_label(self):
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as f:
+            f.write("/home/alice/.ssh\n")
+            name = f.name
+        try:
+            result = _parse_targets_file(name)
+            self.assertEqual(result[0][0], "alice")
+        finally:
+            os.unlink(name)
+
+    def test_comments_and_blanks_skipped(self):
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as f:
+            f.write("# comment\n\nserver1:/tmp/.ssh\n")
+            name = f.name
+        try:
+            result = _parse_targets_file(name)
+            self.assertEqual(len(result), 1)
+        finally:
+            os.unlink(name)
 
 
 if __name__ == "__main__":

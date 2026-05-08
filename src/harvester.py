@@ -9,11 +9,13 @@ import time
 import argparse
 from pathlib import Path
 
-__version__ = "1.2.1"
+__version__ = "1.3.0"
 
 _REPO_ROOT = Path(__file__).parent.parent
 _DEFAULT_JSON = str(_REPO_ROOT / "data" / "findings.json")
 _DEFAULT_HTML = str(_REPO_ROOT / "data" / "shadow_map.html")
+_DEFAULT_MULTI_JSON = str(_REPO_ROOT / "data" / "multi_findings.json")
+_DEFAULT_MULTI_HTML = str(_REPO_ROOT / "data" / "multi_shadow_map.html")
 
 
 def _get_rsa_key_bits(pub_content):
@@ -575,7 +577,163 @@ def _print_results(findings, github_user=None):
     print("══════════════════════════════════════════════════════════════")
 
 
+class TrustGraphAnalyzer:
+    """Build a directed SSH trust graph from multi-host findings and detect cycles."""
+
+    def build_graph(self, multi_findings: dict) -> dict:
+        """
+        Returns adjacency dict: {label: set_of_reachable_labels}.
+        Edge A→B exists when any blast_radius target of host A matches
+        a known hostname associated with host B.
+        """
+        labels = list(multi_findings.keys())
+        graph = {label: set() for label in labels}
+
+        # Map every hostname/IP we know about for each label
+        label_hostnames: dict[str, set] = {}
+        for label, findings in multi_findings.items():
+            names: set = {label}
+            for kh in findings.get("known_hosts", []):
+                names.add(kh["host"])
+            label_hostnames[label] = names
+
+        for src_label, findings in multi_findings.items():
+            all_targets: set = set()
+            for br in findings.get("blast_radius", {}).values():
+                all_targets.update(br.get("targets", []))
+
+            for dst_label in labels:
+                if dst_label == src_label:
+                    continue
+                if all_targets & label_hostnames[dst_label]:
+                    graph[src_label].add(dst_label)
+
+        return graph
+
+    def find_cycles(self, graph: dict) -> list:
+        """Find all simple cycles using DFS. Returns list of cycle paths."""
+        cycles: list = []
+        seen_sets: list = []
+
+        def dfs(start, node, path, visited):
+            for neighbor in sorted(graph.get(node, set())):
+                if neighbor == start and len(path) >= 2:
+                    key = frozenset(path)
+                    if key not in seen_sets:
+                        seen_sets.append(key)
+                        cycles.append(path + [start])
+                elif neighbor not in visited:
+                    visited.add(neighbor)
+                    dfs(start, neighbor, path + [neighbor], visited)
+                    visited.discard(neighbor)
+
+        for node in sorted(graph):
+            dfs(node, node, [node], {node})
+
+        return cycles
+
+    def generate_alerts(self, cycles: list) -> list:
+        return [
+            {
+                "level": "CRITICAL",
+                "key": "circular_trust",
+                "message": f"Circular trust detected: {' → '.join(cycle)}",
+                "remediation": (
+                    "Review authorized_keys and SSH configs on each host in the chain. "
+                    "Remove keys that enable unintended access."
+                ),
+            }
+            for cycle in cycles
+        ]
+
+
+def _parse_targets_file(path: str) -> list:
+    """Parse a targets file into [(label, ssh_dir_path)] pairs."""
+    targets = []
+    with open(path) as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            if ":" in line:
+                label, ssh_path = line.split(":", 1)
+                label, ssh_path = label.strip(), ssh_path.strip()
+            else:
+                ssh_path = line
+                p = Path(line)
+                label = p.parent.name if p.name == ".ssh" else p.name
+            targets.append((label, ssh_path))
+    return targets
+
+
+def _multi_host_mode(args) -> None:
+    targets = _parse_targets_file(args.targets)
+    if not targets:
+        import sys
+        print("Error: --targets file is empty or has no valid entries.", file=sys.stderr)
+        sys.exit(1)
+
+    print(f"\n  FOX-TRACE Multi-Host Scan ({len(targets)} host(s))")
+    print("══════════════════════════════════════════════════════════════")
+
+    multi_findings: dict = {}
+    for label, ssh_path in targets:
+        print(f"  Scanning [{label}] → {ssh_path}")
+        h = SSHHarvester(ssh_dir=ssh_path, stale_days=args.stale)
+        findings = h.harvest()
+        multi_findings[label] = findings
+        score = findings.get("risk_score", 0)
+        n_priv = len(findings["private_keys"])
+        n_kh = len(findings["known_hosts"])
+        print(f"    Risk: {score}/100  Private keys: {n_priv}  Known hosts: {n_kh}")
+
+    print()
+    analyzer = TrustGraphAnalyzer()
+    graph = analyzer.build_graph(multi_findings)
+    cycles = analyzer.find_cycles(graph)
+    circular_alerts = analyzer.generate_alerts(cycles)
+
+    if cycles:
+        print("  [!] CIRCULAR TRUST DETECTED")
+        for alert in circular_alerts:
+            print(f"  [CRITICAL] {alert['message']}")
+            print(f"             → {alert['remediation']}")
+    else:
+        print("  [OK] No circular trust chains detected.")
+
+    has_edges = any(dsts for dsts in graph.values())
+    if has_edges:
+        print("\n  Trust Relationships:")
+        for src, dsts in sorted(graph.items()):
+            for dst in sorted(dsts):
+                marker = " ◄► (circular)" if any(
+                    set(c[:-1]) == {src, dst} for c in cycles
+                ) else ""
+                print(f"    {src} → {dst}{marker}")
+
+    multi_out = getattr(args, "json", None) or _DEFAULT_MULTI_JSON
+    multi_out = multi_out.replace("findings.json", "multi_findings.json")
+    os.makedirs(os.path.dirname(multi_out), exist_ok=True)
+    with open(multi_out, "w") as f:
+        json.dump({
+            "hosts": multi_findings,
+            "trust_graph": {k: sorted(v) for k, v in graph.items()},
+            "circular_chains": cycles,
+            "circular_alerts": circular_alerts,
+        }, f, indent=4)
+    print(f"\n[SUCCESS] Multi-host results saved to {multi_out}")
+
+    if getattr(args, "html", None) is not None:
+        from visualizer import FoxVisualizer
+        html_out = args.html or _DEFAULT_MULTI_HTML
+        FoxVisualizer(data_path=multi_out, output_path=html_out).generate_multi()
+        print(f"[SUCCESS] Multi-host Shadow Map saved to {html_out}")
+
+    print("══════════════════════════════════════════════════════════════")
+
+
 if __name__ == "__main__":
+    import sys
     parser = argparse.ArgumentParser(
         description="Fox-trace — SSH Trust & Lateral Movement Mapper"
     )
@@ -589,7 +747,13 @@ if __name__ == "__main__":
                         help="Flag private keys older than DAYS days (default: 180)")
     parser.add_argument("--ssh-dir", metavar="DIR",
                         help="Path to SSH directory (default: ~/.ssh)")
+    parser.add_argument("--targets", metavar="FILE",
+                        help="Scan multiple SSH directories — file with 'label:path' per line")
     args = parser.parse_args()
+
+    if args.targets:
+        _multi_host_mode(args)
+        sys.exit(0)
 
     harvester = SSHHarvester(ssh_dir=args.ssh_dir, stale_days=args.stale)
     findings = harvester.harvest()
