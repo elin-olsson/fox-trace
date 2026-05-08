@@ -738,6 +738,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description="Fox-trace — SSH Trust & Lateral Movement Mapper"
     )
+    parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     parser.add_argument("--json", metavar="FILE", default=_DEFAULT_JSON,
                         help=f"Write findings to JSON (default: {_DEFAULT_JSON})")
     parser.add_argument("--html", metavar="FILE", nargs="?", const=_DEFAULT_HTML,
