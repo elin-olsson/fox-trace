@@ -9,7 +9,10 @@ from pathlib import Path
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from harvester import SSHHarvester, IdentityMatcher, TrustGraphAnalyzer, _compute_fingerprint, _parse_targets_file
+from harvester import (
+    SSHHarvester, IdentityMatcher, TrustGraphAnalyzer, _compute_fingerprint,
+    _parse_targets_file, render_pdf, render_pdf_multi,
+)
 from visualizer import FoxVisualizer
 
 
@@ -475,6 +478,58 @@ class TestParseTargetsFile(unittest.TestCase):
             self.assertEqual(len(result), 1)
         finally:
             os.unlink(name)
+
+
+class TestRenderPdf(unittest.TestCase):
+    def _write(self, findings):
+        with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as f:
+            path = f.name
+        try:
+            render_pdf(findings, path)
+            with open(path, "rb") as f:
+                return f.read()
+        finally:
+            os.unlink(path)
+
+    def test_writes_valid_pdf_empty_scan(self):
+        h = SSHHarvester(ssh_dir="/nonexistent")
+        data = self._write(h.harvest())
+        self.assertTrue(data.startswith(b"%PDF-1.4"))
+        self.assertTrue(data.rstrip().endswith(b"%%EOF"))
+
+    def test_writes_valid_pdf_with_findings(self):
+        h = SSHHarvester()
+        h.results["private_keys"] = [{"name": "id_rsa", "encrypted": False,
+                                       "permissions": "644", "key_type": "RSA",
+                                       "age_days": 1, "key_bits": 1024}]
+        h.results["blast_radius"] = {"id_rsa": {"percentage": 90, "count": 9,
+                                                  "confidence": "confirmed", "targets": ["a", "b"]}}
+        h._generate_alerts()
+        h.results["risk_score"] = h._compute_risk_score()
+        data = self._write(h.results)
+        self.assertTrue(data.startswith(b"%PDF-1.4"))
+
+
+class TestRenderPdfMulti(unittest.TestCase):
+    def test_writes_valid_pdf_with_circular_trust(self):
+        multi_findings = {
+            "hostA": {"risk_score": 40, "private_keys": [], "known_hosts": []},
+            "hostB": {"risk_score": 20, "private_keys": [], "known_hosts": []},
+        }
+        graph = {"hostA": {"hostB"}, "hostB": {"hostA"}}
+        analyzer = TrustGraphAnalyzer()
+        cycles = analyzer.find_cycles(graph)
+        alerts = analyzer.generate_alerts(cycles)
+
+        with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as f:
+            path = f.name
+        try:
+            render_pdf_multi(multi_findings, graph, cycles, alerts, path)
+            with open(path, "rb") as f:
+                data = f.read()
+            self.assertTrue(data.startswith(b"%PDF-1.4"))
+        finally:
+            os.unlink(path)
 
 
 if __name__ == "__main__":

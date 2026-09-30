@@ -10,13 +10,17 @@ import time
 import argparse
 from pathlib import Path
 
-__version__ = "1.3.0"
+from shadowfox_pdf import PDFReport, GREY, GREEN, RED, ORANGE, BLUE, DEEP_RED
+
+__version__ = "1.4.0"
 
 _REPO_ROOT = Path(__file__).parent.parent
 _DEFAULT_JSON = str(_REPO_ROOT / "data" / "findings.json")
 _DEFAULT_HTML = str(_REPO_ROOT / "data" / "shadow_map.html")
+_DEFAULT_PDF = str(_REPO_ROOT / "data" / "fox_trace_report.pdf")
 _DEFAULT_MULTI_JSON = str(_REPO_ROOT / "data" / "multi_findings.json")
 _DEFAULT_MULTI_HTML = str(_REPO_ROOT / "data" / "multi_shadow_map.html")
+_DEFAULT_MULTI_PDF = str(_REPO_ROOT / "data" / "multi_fox_trace_report.pdf")
 
 
 def _get_rsa_key_bits(pub_content):
@@ -578,6 +582,140 @@ def _print_results(findings, github_user=None):
     print("══════════════════════════════════════════════════════════════")
 
 
+_PDF_BAND_COLOR = {"LOW": GREEN, "MEDIUM": ORANGE, "HIGH": RED}
+_PDF_ALERT_COLOR = {"HIGH": DEEP_RED, "MEDIUM": ORANGE, "LOW": BLUE}
+
+
+def _risk_band(score):
+    return "LOW" if score < 30 else "MEDIUM" if score < 60 else "HIGH"
+
+
+def render_pdf(findings, path, github_user=None):
+    """Write a client-ready PDF report for a single-host scan."""
+    total = sum(len(findings[k]) for k in
+                ("private_keys", "public_keys", "authorized_keys", "known_hosts", "active_agents"))
+    score = findings.get("risk_score", 0)
+    band = _risk_band(score)
+
+    report = PDFReport("fox-trace", "SSH Trust & Lateral Movement Mapper")
+    report.heading("SSH Trust & Lateral Movement Mapper")
+    report.score_bar(score, band, _PDF_BAND_COLOR[band])
+    report.text(f"{total} artifacts identified", color=GREY)
+    report.rule()
+
+    report.subheading("Summary")
+    report.text(
+        f"Private keys: {len(findings['private_keys'])}   "
+        f"Public keys: {len(findings['public_keys'])}   "
+        f"Authorized keys: {len(findings['authorized_keys'])}   "
+        f"Known hosts: {len(findings['known_hosts'])}   "
+        f"Active agents: {len(findings['active_agents'])}"
+    )
+    if findings.get("dir_permissions"):
+        ok = findings["dir_permissions"] == "700"
+        report.text(
+            f"~/.ssh permissions: {findings['dir_permissions']} "
+            f"({'OK' if ok else 'should be 700'})",
+            color=GREEN if ok else ORANGE,
+        )
+    report.spacer(6)
+
+    if findings["private_keys"]:
+        report.subheading("Private Keys")
+        for k in findings["private_keys"]:
+            enc = "encrypted" if k.get("encrypted") else "NO PASSPHRASE"
+            report.text(
+                f"{k['name']}  {k.get('key_type', '?')}  perm:{k.get('permissions', '?')}  "
+                f"{enc}  age:{k['age_days']}d",
+                mono=True, size=9,
+            )
+        report.spacer(6)
+
+    if findings["blast_radius"]:
+        report.subheading("Blast Radius Analysis")
+        for key, r in findings["blast_radius"].items():
+            conf = "" if r["confidence"] == "confirmed" else " [potential]"
+            report.text(f"{key} -> {r['count']} hosts ({r['percentage']}%){conf}",
+                        mono=True, size=9)
+        report.spacer(6)
+
+    if findings["risk_alerts"]:
+        report.subheading("Risk Alerts & Remediations")
+        for alert in findings["risk_alerts"]:
+            color = _PDF_ALERT_COLOR.get(alert["level"], GREY)
+            fix = alert.get("remediation", "")
+            report.severity_line(alert["level"], alert["message"],
+                                  f"Fix: {fix}" if fix else "", color)
+        report.spacer(6)
+
+    if findings.get("forward_agent_hosts"):
+        report.subheading("ForwardAgent")
+        for h in findings["forward_agent_hosts"]:
+            report.text(f"ForwardAgent enabled for: {h}", mono=True, size=9)
+        report.spacer(6)
+
+    if findings.get("github_matches"):
+        report.subheading(f"Identity Matching (GitHub: {github_user})")
+        for m in findings["github_matches"]:
+            report.text(f"[MATCH] Key in {m['source']} - comment: {m['comment']}",
+                        mono=True, size=9)
+        report.spacer(6)
+
+    scratch = SSHHarvester.__new__(SSHHarvester)
+    scratch.results = findings
+    scratch.stale_days = 180
+    narrative = scratch._build_attack_narrative()
+    if narrative:
+        report.rule()
+        report.subheading("Most Critical Attack Path")
+        for line in narrative.split("\n  "):
+            report.text(line.strip(), mono=True, size=9)
+
+    report.save(path)
+
+
+def render_pdf_multi(multi_findings, graph, cycles, circular_alerts, path):
+    """Write a client-ready PDF report for a multi-host (--targets) scan."""
+    report = PDFReport("fox-trace", "Multi-Host SSH Trust Report")
+    report.heading("Multi-Host SSH Trust Report")
+    report.text(f"{len(multi_findings)} host(s) scanned", color=GREY)
+    report.rule()
+
+    report.subheading("Per-host risk")
+    for label, findings in multi_findings.items():
+        score = findings.get("risk_score", 0)
+        n_priv = len(findings["private_keys"])
+        n_kh = len(findings["known_hosts"])
+        band = _risk_band(score)
+        report.text(
+            f"{label}: {score}/100 [{band}]   Private keys: {n_priv}   Known hosts: {n_kh}",
+            mono=True, color=_PDF_BAND_COLOR[band],
+        )
+    report.spacer(6)
+
+    report.rule()
+    report.subheading("Circular trust")
+    if cycles:
+        for alert in circular_alerts:
+            report.severity_line("CRITICAL", alert["message"], alert.get("remediation", ""), DEEP_RED)
+    else:
+        report.text("No circular trust chains detected.", color=GREEN)
+    report.spacer(6)
+
+    has_edges = any(dsts for dsts in graph.values())
+    if has_edges:
+        report.rule()
+        report.subheading("Trust relationships")
+        for src, dsts in sorted(graph.items()):
+            for dst in sorted(dsts):
+                marker = " (circular)" if any(
+                    set(c[:-1]) == {src, dst} for c in cycles
+                ) else ""
+                report.text(f"{src} -> {dst}{marker}", mono=True, size=9)
+
+    report.save(path)
+
+
 class TrustGraphAnalyzer:
     """Build a directed SSH trust graph from multi-host findings and detect cycles."""
 
@@ -730,6 +868,11 @@ def _multi_host_mode(args) -> None:
         FoxVisualizer(data_path=multi_out, output_path=html_out).generate_multi()
         print(f"[SUCCESS] Multi-host Shadow Map saved to {html_out}")
 
+    if getattr(args, "pdf", None) is not None:
+        pdf_out = args.pdf or _DEFAULT_MULTI_PDF
+        render_pdf_multi(multi_findings, graph, cycles, circular_alerts, pdf_out)
+        print(f"[SUCCESS] Multi-host PDF report saved to {pdf_out}")
+
     print("══════════════════════════════════════════════════════════════")
 
 
@@ -743,6 +886,8 @@ if __name__ == "__main__":
                         help=f"Write findings to JSON (default: {_DEFAULT_JSON})")
     parser.add_argument("--html", metavar="FILE", nargs="?", const=_DEFAULT_HTML,
                         help="Generate interactive Shadow Map HTML")
+    parser.add_argument("--pdf", metavar="FILE", nargs="?", const=_DEFAULT_PDF,
+                        help="Write a client-ready PDF report")
     parser.add_argument("--github", metavar="USER",
                         help="Match local keys against a GitHub user's public keys")
     parser.add_argument("--stale", metavar="DAYS", type=int, default=180,
@@ -770,3 +915,7 @@ if __name__ == "__main__":
     if args.html is not None:
         from visualizer import FoxVisualizer
         FoxVisualizer(data_path=args.json, output_path=args.html).generate()
+
+    if args.pdf is not None:
+        render_pdf(findings, args.pdf, github_user=args.github)
+        print(f"[SUCCESS] PDF report saved to {args.pdf}")

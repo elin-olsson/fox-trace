@@ -56,6 +56,9 @@ python3 src/harvester.py --json data/custom_findings.json
 # Generate the interactive Shadow Map (HTML)
 python3 src/harvester.py --html
 
+# Write a client-ready PDF report
+python3 src/harvester.py --pdf
+
 # Match keys against a GitHub user's public keys
 python3 src/harvester.py --github elin-olsson
 
@@ -63,11 +66,11 @@ python3 src/harvester.py --github elin-olsson
 python3 src/harvester.py --stale 90
 
 # Scan multiple hosts and detect circular trust relationships
-python3 src/harvester.py --targets targets.txt --html
+python3 src/harvester.py --targets targets.txt --html --pdf
 ```
 
 
-> **Note:** The `data/` directory is created automatically on first run. Output files (`findings.json` and `shadow_map.html`) are written there by default.
+> **Note:** The `data/` directory is created automatically on first run. Output files (`findings.json`, `shadow_map.html`, `fox_trace_report.pdf`) are written there by default.
 
 ### Flags
 
@@ -76,6 +79,7 @@ python3 src/harvester.py --targets targets.txt --html
 | `--version` | Print the version number and exit |
 | `--json FILE` | Write structured findings to JSON |
 | `--html [FILE]` | Generate interactive D3.js Shadow Map (optional path; defaults to `data/shadow_map.html`) |
+| `--pdf [FILE]` | Write a client-ready PDF report (optional path; defaults to `data/fox_trace_report.pdf`) |
 | `--ssh-dir DIR` | Path to SSH directory to scan (default: `~/.ssh`) |
 | `--github USER` | Match keys against GitHub public API |
 | `--stale DAYS` | Flag keys older than X days (default: 180) |
@@ -156,6 +160,16 @@ python3 src/harvester.py --html
 - **Hover** — hover over any node for a quick summary without clicking
 - **Zoom & drag** — scroll to zoom, drag nodes to rearrange, ESC to close the info panel
 
+## PDF report
+
+Use `--pdf [file]` to generate a paginated PDF report suitable for handing to a client after an engagement:
+
+```bash
+python3 src/harvester.py --pdf
+```
+
+Includes the risk score, artifact summary, private key table, blast radius analysis, risk alerts with remediation, and the most critical attack path. `--targets` scans get a multi-host variant instead, with per-host risk and the circular trust findings. Built with a small dependency-free PDF writer (no LaTeX, no headless browser) so it needs nothing beyond the Python standard library.
+
 ## Dependencies
 
 No runtime dependencies — stdlib only.
@@ -167,6 +181,7 @@ No runtime dependencies — stdlib only.
 | `hashlib` | stdlib | SSH key fingerprinting (SHA256) |
 | `base64` / `struct` | stdlib | RSA key size parsing |
 | `d3.js` | v7 (CDN) | Interactive graph rendering (via visualizer) |
+| `shadowfox_pdf` | vendored | Dependency-free PDF report writer, bundled in this repo (`src/shadowfox_pdf.py`) |
 
 ---
 

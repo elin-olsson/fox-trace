@@ -22,6 +22,7 @@ build/
 data/
 *.html
 *.json
+*.pdf
 
 # Editor / tool directories
 .DS_Store
